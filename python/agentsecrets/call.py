@@ -160,6 +160,9 @@ def call(
 ) -> AgentSecretsResponse:
     """Make an authenticated API call through the proxy (synchronous).
 
+    If no injection arguments are provided, the call bypasses the proxy
+    and connects directly to the target URL.
+
     Parameters
     ----------
     port:
@@ -184,6 +187,43 @@ def call(
     -------
     AgentSecretsResponse
     """
+    has_injection = any([bearer, basic, header, query, body_field, form_field])
+
+    req_headers = dict(headers) if headers else {}
+    content: bytes | None = None
+
+    if body is not None:
+        if isinstance(body, bytes):
+            content = body
+        else:
+            import json
+            content = json.dumps(body).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+
+    import time
+    start = time.monotonic()
+
+    if not has_injection:
+        # Direct bypass: hit the target URL directly.
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.request(
+                    method.upper(),
+                    url,
+                    headers=req_headers,
+                    content=content,
+                )
+        except httpx.RequestError as exc:
+            raise UpstreamError(status_code=502, body=str(exc), url=url)
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        if resp.status_code >= 400:
+            raise UpstreamError(status_code=resp.status_code, body=resp.text, url=url)
+
+        return _to_response(resp, elapsed_ms)
+
+    # Proxy path
     proxy_headers = _build_proxy_headers(
         url,
         method=method,
@@ -195,30 +235,20 @@ def call(
         form_field=form_field,
         agent_id=agent_id,
     )
-    if headers:
-        proxy_headers.update(headers)
-
-    # Encode body.
-    content: bytes | None = None
-    if body is not None:
-        if isinstance(body, bytes):
-            content = body
-        else:
-            import json
-            content = json.dumps(body).encode("utf-8")
-            proxy_headers.setdefault("Content-Type", "application/json")
+    proxy_headers.update(req_headers)
 
     proxy_url = f"http://localhost:{port}/proxy"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.request(
+                method.upper(),
+                proxy_url,
+                headers=proxy_headers,
+                content=content,
+            )
+    except httpx.RequestError as exc:
+        raise UpstreamError(status_code=502, body=str(exc), url=url)
 
-    import time
-    start = time.monotonic()
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.request(
-            method.upper(),
-            proxy_url,
-            headers=proxy_headers,
-            content=content,
-        )
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     if resp.status_code >= 400:
@@ -249,8 +279,46 @@ async def async_call(
 ) -> AgentSecretsResponse:
     """Make an authenticated API call through the proxy (asynchronous).
 
-    Same parameters as :func:`call`.
+    Same parameters as :func:`call`. Direct bypass applies if no injections
+    are requested.
     """
+    has_injection = any([bearer, basic, header, query, body_field, form_field])
+
+    req_headers = dict(headers) if headers else {}
+    content: bytes | None = None
+
+    if body is not None:
+        if isinstance(body, bytes):
+            content = body
+        else:
+            import json
+            content = json.dumps(body).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+
+    import time
+    start = time.monotonic()
+
+    if not has_injection:
+        # Direct bypass: hit the target URL directly.
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.request(
+                    method.upper(),
+                    url,
+                    headers=req_headers,
+                    content=content,
+                )
+        except httpx.RequestError as exc:
+            raise UpstreamError(status_code=502, body=str(exc), url=url)
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        if resp.status_code >= 400:
+            raise UpstreamError(status_code=resp.status_code, body=resp.text, url=url)
+
+        return _to_response(resp, elapsed_ms)
+
+    # Proxy path
     proxy_headers = _build_proxy_headers(
         url,
         method=method,
@@ -262,32 +330,24 @@ async def async_call(
         form_field=form_field,
         agent_id=agent_id,
     )
-    if headers:
-        proxy_headers.update(headers)
-
-    content: bytes | None = None
-    if body is not None:
-        if isinstance(body, bytes):
-            content = body
-        else:
-            import json
-            content = json.dumps(body).encode("utf-8")
-            proxy_headers.setdefault("Content-Type", "application/json")
+    proxy_headers.update(req_headers)
 
     proxy_url = f"http://localhost:{port}/proxy"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.request(
+                method.upper(),
+                proxy_url,
+                headers=proxy_headers,
+                content=content,
+            )
+    except httpx.RequestError as exc:
+        raise UpstreamError(status_code=502, body=str(exc), url=url)
 
-    import time
-    start = time.monotonic()
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.request(
-            method.upper(),
-            proxy_url,
-            headers=proxy_headers,
-            content=content,
-        )
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     if resp.status_code >= 400:
         raise _map_proxy_error(resp.status_code, resp.content, url)
 
     return _to_response(resp, elapsed_ms)
+

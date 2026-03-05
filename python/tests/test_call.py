@@ -133,3 +133,83 @@ class TestMapProxyError:
         exc = _map_proxy_error(403, body, "https://httpbin.org/get")
         assert isinstance(exc, DomainNotAllowed)
         assert exc.domain == "httpbin.org"
+
+
+class TestDirectBypass:
+    """Verify that call() and async_call() bypass the proxy when no injections are used."""
+
+    def test_direct_bypass_sync(self, httpx_mock: httpx.MockTransport) -> None:
+        """A sync call with no injections hits the target URL directly."""
+        httpx_mock.add_response(
+            url="https://api.example.com/status",
+            method="GET",
+            status_code=200,
+            json={"ok": True},
+        )
+
+        from agentsecrets.call import call
+        resp = call(8765, "https://api.example.com/status")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        
+        # Verify the mock received the request at the actual URL, not localhost proxy
+        request = httpx_mock.get_requests()[0]
+        assert str(request.url) == "https://api.example.com/status"
+        assert "X-AS-Target-URL" not in request.headers
+
+    @pytest.mark.asyncio
+    async def test_direct_bypass_async(self, httpx_mock: httpx.MockTransport) -> None:
+        """An async call with no injections hits the target URL directly."""
+        httpx_mock.add_response(
+            url="https://api.example.com/status",
+            method="POST",
+            status_code=201,
+            json={"created": True},
+        )
+
+        from agentsecrets.call import async_call
+        resp = await async_call(8765, "https://api.example.com/status", method="POST", body={"foo": "bar"})
+
+        assert resp.status_code == 201
+        assert resp.json() == {"created": True}
+        
+        request = httpx_mock.get_requests()[0]
+        assert str(request.url) == "https://api.example.com/status"
+        # Content-Type should be set for the JSON body
+        assert request.headers["Content-Type"] == "application/json"
+        assert json.loads(request.content) == {"foo": "bar"}
+
+    def test_direct_bypass_http_error(self, httpx_mock: httpx.MockTransport) -> None:
+        """HTTP errors in bypass mode raise UpstreamError directly."""
+        httpx_mock.add_response(
+            url="https://api.example.com/fail",
+            method="GET",
+            status_code=404,
+            text="Not Found",
+        )
+
+        from agentsecrets.call import call
+        with pytest.raises(UpstreamError) as exc_info:
+            call(8765, "https://api.example.com/fail")
+            
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.url == "https://api.example.com/fail"
+        assert exc_info.value.body == "Not Found"
+
+    def test_direct_bypass_network_error(self, httpx_mock: httpx.MockTransport) -> None:
+        """Network errors in bypass mode raise UpstreamError with status 502."""
+        import httpx
+        
+        def raise_timeout(*args: Any, **kwargs: Any) -> httpx.Response:
+            raise httpx.ConnectTimeout("Connection timed out")
+            
+        httpx_mock.add_callback(raise_timeout)
+
+        from agentsecrets.call import call
+        with pytest.raises(UpstreamError) as exc_info:
+            call(8765, "https://api.example.com/timeout")
+            
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.url == "https://api.example.com/timeout"
+        assert "Connection timed out" in exc_info.value.body

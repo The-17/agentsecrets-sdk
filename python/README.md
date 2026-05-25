@@ -3,14 +3,14 @@
 The official Python client for [AgentSecrets](https://github.com/The-17/agentsecrets) — zero-knowledge secrets infrastructure for AI agents.
 
 * **Documentation Guides**:
-  * [Introduction & Core Concepts](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/introduction.md)
-  * [Core API Reference (`call` & `spawn`)](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/core_api.md)
-  * [Transparent HTTP Interception (Stripe, OpenAI, LangChain)](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/http_interception.md)
-  * [Universal Environment Switching Guide](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/universal_environment_switching.md)
-  * [Management API Reference](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/management_api.md)
-  * [Error Handling & Troubleshooting](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/error_handling.md)
-  * [Testing with `MockAgentSecrets`](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/testing.md)
-  * [Practical Developer Tutorials](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/tutorials.md)
+  * [Introduction & Core Concepts](../docs/introduction.md)
+  * [Core API Reference (`call` & `spawn`)](../docs/core_api.md)
+  * [Transparent HTTP Interception (Stripe, OpenAI, LangChain)](../docs/http_interception.md)
+  * [Universal Environment Switching Guide](../docs/universal_environment_switching.md)
+  * [Management API Reference](../docs/management_api.md)
+  * [Error Handling & Troubleshooting](../docs/error_handling.md)
+  * [Testing with `MockAgentSecrets`](../docs/testing.md)
+  * [Practical Developer Tutorials](../docs/tutorials.md)
 
 ```python
 from agentsecrets import AgentSecrets
@@ -533,7 +533,7 @@ pytest -v
 - **AgentSecrets CLI**: [github.com/The-17/agentsecrets](https://github.com/The-17/agentsecrets)
 - **SDK repo**: [github.com/The-17/agentsecrets-sdk](https://github.com/The-17/agentsecrets-sdk)
 - **ClawHub**: [clawhub.ai/SteppaCodes/agentsecrets](https://clawhub.ai/SteppaCodes/agentsecrets)
-- **Security**: hello@theseventeen.co
+- **Security**: engineering@theseventeen.co
 
 ---
 

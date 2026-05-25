@@ -113,6 +113,19 @@ Make authenticated API calls and spawn credential-injected processes. This is wh
 **Layer 2 — The Management Layer**
 Full programmatic control of the AgentSecrets lifecycle. Workspace and project management, secrets operations, drift detection, audit log access. This is what AI agents need to operate the credentials infrastructure autonomously.
 
+## Documentation Guides
+
+Explore the detailed architecture and usage guides in the [docs/](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs) folder:
+
+* **[Introduction & Concepts](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/introduction.md)**: Architectural overview, prerequisites, and quick start.
+* **[Core API Reference](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/core_api.md)**: Detailed API reference for secure calls (`call()`) and process spawning (`spawn()`).
+* **[Transparent HTTP Interception](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/http_interception.md)**: Patching standard clients (requests/httpx) and third-party SDKs (Stripe, OpenAI, LangChain) with zero-knowledge credential placeholders.
+* **[Universal Environment Switching](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/universal_environment_switching.md)**: Programmatic project environment switching.
+* **[Management API Reference](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/management_api.md)**: Programmatic control over workspaces, projects, secrets, allowlists, and audit logs.
+* **[Error Handling & Diagnostics](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/error_handling.md)**: Custom exceptions, trigger causes, and recovery procedures.
+* **[Testing Guide](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/testing.md)**: Mock testing with `MockAgentSecrets`.
+* **[Practical Tutorials](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/tutorials.md)**: Building MCP servers, secure LangChain agents, and multi-tenant scripts.
+
 ---
 
 ## Language Support

@@ -21,13 +21,13 @@ Usage::
 from __future__ import annotations
 
 import os
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any
 
 from .auth import AuthContext, resolve
 from .call import async_call as _async_call
 from .call import call as _call
-from .errors import AgentSecretsError
 from .management.allowlist import AllowlistClient
 from .management.projects import ProjectsClient
 from .management.proxy import ProxyClient
@@ -61,11 +61,31 @@ class AgentSecrets:
         workspace: str | None = None,
         project: str | None = None,
         auto_start: bool = True,
+        intercept: bool = False,
+        environment: str | None = None,
     ) -> None:
         self._port = port or int(os.environ.get("AGENTSECRETS_PORT", DEFAULT_PORT))
         self._workspace = workspace or os.environ.get("AGENTSECRETS_WORKSPACE")
         self._project = project or os.environ.get("AGENTSECRETS_PROJECT")
         self._auto_start = auto_start
+
+        from .config import settings
+        self._environment = (
+            environment
+            or os.environ.get("AGENTSECRETS_ENV")
+            or os.environ.get("AS_ENV")
+        )
+        if self._environment:
+            settings.environment = self._environment
+
+        if intercept:
+            from . import init as _init
+            _init(
+                port=self._port,
+                workspace=self._workspace,
+                project=self._project,
+                environment=self._environment,
+            )
 
         # Management sub-clients
         self.workspaces = WorkspacesClient()

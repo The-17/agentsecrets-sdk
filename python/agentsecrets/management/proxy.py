@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json as _json
-from datetime import datetime, timezone
+from datetime import datetime
 
 from .._cli import run
+from ..errors import ProxyConnectionError
 from ..models import AuditEvent, ProxyStatus
 from ..proxy import DEFAULT_PORT, health_check
-from ..errors import ProxyConnectionError
 
 
 class ProxyClient:

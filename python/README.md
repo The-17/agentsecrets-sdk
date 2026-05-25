@@ -2,6 +2,16 @@
 
 The official Python client for [AgentSecrets](https://github.com/The-17/agentsecrets) — zero-knowledge secrets infrastructure for AI agents.
 
+* **Documentation Guides**:
+  * [Introduction & Core Concepts](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/introduction.md)
+  * [Core API Reference (`call` & `spawn`)](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/core_api.md)
+  * [Transparent HTTP Interception (Stripe, OpenAI, LangChain)](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/http_interception.md)
+  * [Universal Environment Switching Guide](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/universal_environment_switching.md)
+  * [Management API Reference](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/management_api.md)
+  * [Error Handling & Troubleshooting](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/error_handling.md)
+  * [Testing with `MockAgentSecrets`](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/testing.md)
+  * [Practical Developer Tutorials](file:///wsl.localhost/Ubuntu/home/theapiartist/work/agentsecrets-sdk/docs/tutorials.md)
+
 ```python
 from agentsecrets import AgentSecrets
 
@@ -98,6 +108,89 @@ response = client.call(
     body={"amount": 1000, "currency": "usd", "source": "tok_visa"},
 )
 print(response.json())
+```
+
+---
+
+## Transparent HTTP Interception
+
+If you are using standard HTTP clients like `requests` or `httpx` and want to keep your code unchanged, you can enable transparent interception. With interception active, any outbound HTTP request using standard clients that contains an `AS_SECRET_` placeholder value in its headers will be automatically intercepted, stripped of the placeholder, and routed through the local AgentSecrets proxy.
+
+This is extremely useful when integrating with existing AI agent libraries (like LangChain, LlamaIndex, or the OpenAI SDK) where you cannot easily modify the underlying HTTP request calls.
+
+### Usage
+
+```python
+from agentsecrets import init, credential
+import httpx
+
+# 1. Initialize the transparent interceptor
+# Optionally pass context settings: port, workspace, project, or environment.
+init(intercept=True, environment="development")
+
+# 2. Use the credential helper to define a placeholder
+stripe_token = credential.STRIPE_API_KEY  # yields "AS_SECRET_STRIPE_API_KEY"
+
+# 3. Call the API using standard httpx (sync & async) or requests
+# The call is intercepted, routed through the proxy, resolved, and sent.
+response = httpx.get(
+    "https://api.stripe.com/v1/charges",
+    headers={"Authorization": f"Bearer {stripe_token}"}
+)
+print(response.json())
+```
+
+Alternatively, you can enable interception and configure the environment directly in the `AgentSecrets` constructor:
+
+```python
+from agentsecrets import AgentSecrets, credential
+import requests
+
+# Enable interception in the client constructor
+client = AgentSecrets(intercept=True, environment="development")
+
+# Make standard requests call
+response = requests.get(
+    "https://api.stripe.com/v1/balance",
+    headers={"Authorization": f"Bearer {credential.STRIPE_API_KEY}"}
+)
+```
+
+### Integrating with Third-Party SDKs (e.g., Stripe, OpenAI)
+
+Because the interceptor hooks at the `requests` and `httpx` transport level, you can use official third-party libraries seamlessly while keeping your credential keys 100% zero-knowledge:
+
+```python
+import stripe
+from agentsecrets import init, credential
+
+# 1. Enable interception globally
+init(intercept=True, environment="production")
+
+# 2. Set the placeholder on the Stripe SDK
+stripe.api_key = credential.STRIPE_SECRET_KEY  # Yields "AS_SECRET_STRIPE_SECRET_KEY"
+
+# 3. Call standard Stripe methods — they route securely through the proxy automatically!
+charge = stripe.Charge.create(
+    amount=2000,
+    currency="usd",
+    source="tok_visa",
+)
+```
+
+---
+
+## Universal Environment Switching
+
+The active environment context is universal across your project (stored on disk in `.agentsecrets/project.json`). The running proxy resolves credentials based on this file dynamically. 
+
+You can switch the project's active environment context programmatically through the global `settings` object or `init()` function. Setting the environment shells out to the CLI in the background to update the active environment configuration:
+
+```python
+from agentsecrets import settings
+
+# Programmatically switch the project's active environment
+settings.environment = "staging"  # Runs 'agentsecrets environment switch staging' under the hood
 ```
 
 ---

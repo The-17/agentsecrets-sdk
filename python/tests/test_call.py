@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from agentsecrets.call import _build_proxy_headers, _map_proxy_error
 from agentsecrets.errors import DomainNotAllowed, SecretNotFound, UpstreamError
 

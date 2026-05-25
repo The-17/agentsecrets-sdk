@@ -21,7 +21,6 @@ from .errors import (
     UpstreamError,
 )
 from .models import AgentSecretsResponse
-from .proxy import DEFAULT_PORT
 
 # ---------------------------------------------------------------------------
 # Header building — one function, no duplication

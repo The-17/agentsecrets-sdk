@@ -11,7 +11,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 
-from .errors import CLIError, CLINotFound
+from .errors import CLIError
 from .proxy import find_binary
 
 

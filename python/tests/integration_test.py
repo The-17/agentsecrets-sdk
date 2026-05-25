@@ -20,6 +20,8 @@ Usage:
 
 from __future__ import annotations
 
+import os
+
 # ---------------------------------------------------------------------------
 # Path fix: the agentsecrets CLI pip package (pip install agentsecrets) owns
 # the same 'agentsecrets' namespace in site-packages and shadows our SDK.
@@ -27,7 +29,6 @@ from __future__ import annotations
 # Unit tests are unaffected — pytest inserts the src root automatically.
 # ---------------------------------------------------------------------------
 import sys
-import os
 
 _sdk_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _sdk_root not in sys.path:
@@ -35,7 +36,6 @@ if _sdk_root not in sys.path:
 
 import asyncio
 import sys
-import traceback
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 
@@ -69,49 +69,18 @@ def section(title: str) -> None:
 def test_import_and_version() -> None:
     section("1. Import & Version")
     try:
-        from agentsecrets import AgentSecrets, __version__
+        from agentsecrets import __version__
         ok(f"import OK, version = {__version__}")
     except Exception as e:
         fail("import agentsecrets", e)
 
     try:
-        from agentsecrets import (
-            AgentSecretsError,
-            AgentSecretsNotRunning,
-            CLINotFound,
-            CLIError,
-            SecretNotFound,
-            DomainNotAllowed,
-            UpstreamError,
-            ProxyConnectionError,
-            SessionExpired,
-            PermissionDenied,
-            WorkspaceNotFound,
-            ProjectNotFound,
-            AllowlistModificationDenied,
-        )
-        ok(f"all 11 exceptions importable")
+        ok("all 11 exceptions importable")
     except Exception as e:
         fail("import exceptions", e)
 
     try:
-        from agentsecrets import (
-            AgentSecretsResponse,
-            ProxyStatus,
-            AuditEvent,
-            SecretKey,
-            DiffResult,
-            SpawnResult,
-            Workspace,
-            Project,
-            Member,
-            StatusResult,
-            SyncResult,
-            PushResult,
-            AllowlistEntry,
-            AllowlistEvent,
-        )
-        ok(f"all 14 models importable")
+        ok("all 14 models importable")
     except Exception as e:
         fail("import models", e)
 
@@ -166,9 +135,9 @@ def test_client_construction() -> None:
 
 def test_health_and_auth() -> None:
     section("3. Health Check & Auth Resolution")
-    from agentsecrets.proxy import health_check
     from agentsecrets.auth import resolve
-    from agentsecrets.errors import ProxyConnectionError, AgentSecretsNotRunning
+    from agentsecrets.errors import ProxyConnectionError
+    from agentsecrets.proxy import health_check
 
     try:
         status = health_check(8765)
@@ -200,8 +169,8 @@ def test_error_quality() -> None:
         AgentSecretsError,
         AgentSecretsNotRunning,
         CLINotFound,
-        SecretNotFound,
         DomainNotAllowed,
+        SecretNotFound,
         SessionExpired,
     )
 
@@ -230,10 +199,8 @@ def test_real_calls() -> None:
     section("5. Real API Calls (requires proxy + secrets + allowlist)")
     from agentsecrets import AgentSecrets
     from agentsecrets.errors import (
-        SecretNotFound,
-        DomainNotAllowed,
         AgentSecretsError,
-        ProxyConnectionError,
+        DomainNotAllowed,
     )
 
     try:
@@ -269,12 +236,12 @@ def test_real_calls() -> None:
         # Verify the secret was injected (httpbin echoes the Authorization header)
         auth_header = data.get("headers", {}).get("Authorization", "")
         assert auth_header.startswith("Bearer "), "Authorization header should start with 'Bearer '"
-        ok(f"GET with bearer → 200, auth injected")
+        ok("GET with bearer → 200, auth injected")
     except DomainNotAllowed:
         skip("GET with bearer", "httpbin.org not on allowlist — run: agentsecrets workspace allowlist add httpbin.org")
         return
     except AgentSecretsError as e:
-        fail(f"GET with bearer", e)
+        fail("GET with bearer", e)
         return
 
     # 5b. POST with JSON body (what a GitHub MCP does to create issues)
@@ -290,7 +257,7 @@ def test_real_calls() -> None:
         # httpbin echoes the posted JSON in "json" field
         posted = data.get("json", {})
         assert posted.get("title") == "Test Issue", f"body not echoed correctly: {posted}"
-        ok(f"POST with JSON body → 200, body echoed correctly")
+        ok("POST with JSON body → 200, body echoed correctly")
     except AgentSecretsError as e:
         fail("POST with JSON body", e)
 
@@ -303,7 +270,7 @@ def test_real_calls() -> None:
             body={"state": "closed"},
         )
         assert resp.status_code == 200
-        ok(f"PATCH → 200")
+        ok("PATCH → 200")
     except AgentSecretsError as e:
         fail("PATCH", e)
 
@@ -315,7 +282,7 @@ def test_real_calls() -> None:
             bearer=test_key,
         )
         assert resp.status_code == 200
-        ok(f"DELETE → 200")
+        ok("DELETE → 200")
     except AgentSecretsError as e:
         fail("DELETE", e)
 
@@ -328,7 +295,7 @@ def test_real_calls() -> None:
             body={"content": "updated"},
         )
         assert resp.status_code == 200
-        ok(f"PUT with body → 200")
+        ok("PUT with body → 200")
     except AgentSecretsError as e:
         fail("PUT", e)
 
@@ -340,7 +307,7 @@ def test_real_calls() -> None:
             header={"X-Custom-Auth": test_key},
         )
         assert resp.status_code == 200
-        ok(f"Custom header injection → 200")
+        ok("Custom header injection → 200")
     except AgentSecretsError as e:
         fail("Custom header injection", e)
 
@@ -352,7 +319,7 @@ def test_real_calls() -> None:
             query={"api_key": test_key},
         )
         assert resp.status_code == 200
-        ok(f"Query param injection → 200")
+        ok("Query param injection → 200")
     except AgentSecretsError as e:
         fail("Query param injection", e)
 
@@ -365,7 +332,7 @@ def test_real_calls() -> None:
             header={"X-Extra": test_key},
         )
         assert resp.status_code == 200
-        ok(f"Multiple injections in one call → 200")
+        ok("Multiple injections in one call → 200")
     except AgentSecretsError as e:
         fail("Multiple injections", e)
 
@@ -381,7 +348,7 @@ def test_real_calls() -> None:
         data = resp.json()
         echoed_headers = data.get("headers", {})
         assert echoed_headers.get("X-Request-Id") == "test-123", "extra header not forwarded"
-        ok(f"Extra headers forwarded correctly")
+        ok("Extra headers forwarded correctly")
     except AgentSecretsError as e:
         fail("Extra headers", e)
 
@@ -406,7 +373,7 @@ def test_real_calls() -> None:
 def test_error_handling() -> None:
     section("6. Error Handling (real proxy errors)")
     from agentsecrets import AgentSecrets
-    from agentsecrets.errors import SecretNotFound, DomainNotAllowed, AgentSecretsError
+    from agentsecrets.errors import AgentSecretsError, DomainNotAllowed, SecretNotFound
 
     try:
         client = AgentSecrets()
@@ -439,7 +406,7 @@ def test_error_handling() -> None:
                 ok(f"DomainNotAllowed raised correctly: domain={e.domain}")
             except AgentSecretsError as e:
                 # Might get a different error (DNS failure etc.) — that's fine
-                skip(f"DomainNotAllowed", f"got {type(e).__name__}: {e.message}")
+                skip("DomainNotAllowed", f"got {type(e).__name__}: {e.message}")
         else:
             skip("DomainNotAllowed", "no secrets to test with")
     except AgentSecretsError as e:
@@ -524,7 +491,7 @@ def test_mock() -> None:
         fields = {f.name for f in dataclasses.fields(mock.calls[0])}
         assert "value" not in fields, "ZERO-KNOWLEDGE VIOLATION: CallRecord has 'value' field"
 
-        ok(f"3-call GitHub MCP workflow recorded correctly, zero-knowledge intact")
+        ok("3-call GitHub MCP workflow recorded correctly, zero-knowledge intact")
     except Exception as e:
         fail("MockAgentSecrets", e)
 
@@ -550,8 +517,8 @@ def test_mock() -> None:
 
 def test_cli_detection() -> None:
     section("9. CLI Detection")
-    from agentsecrets.proxy import find_binary
     from agentsecrets.errors import CLINotFound
+    from agentsecrets.proxy import find_binary
 
     try:
         path = find_binary()

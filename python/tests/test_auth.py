@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agentsecrets.auth import AuthContext, resolve
+from agentsecrets.auth import resolve
 from agentsecrets.errors import AgentSecretsNotRunning, ProxyConnectionError
 from agentsecrets.models import ProxyStatus
 

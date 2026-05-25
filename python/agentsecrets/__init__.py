@@ -13,9 +13,11 @@
     )
 """
 
-__version__ = "1.2.1"
+__version__ = "2.0.0"
 
 from .client import AgentSecrets
+from .config import settings
+from .credential import credential
 from .errors import (
     AgentSecretsError,
     AgentSecretsNotRunning,
@@ -31,6 +33,7 @@ from .errors import (
     UpstreamError,
     WorkspaceNotFound,
 )
+from .interceptor import install_interceptor
 from .models import (
     AgentSecretsResponse,
     AllowlistEntry,
@@ -48,7 +51,33 @@ from .models import (
     Workspace,
 )
 
+
+def init(
+    *,
+    port: int | None = None,
+    workspace: str | None = None,
+    project: str | None = None,
+    environment: str | None = None,
+) -> None:
+    """Initializes the AgentSecrets secure credential boundary.
+    Configures settings and registers transparent HTTP interception.
+    """
+    if port is not None:
+        settings.port = port
+    if workspace is not None:
+        settings.workspace = workspace
+    if project is not None:
+        settings.project = project
+    if environment is not None:
+        settings.environment = environment
+
+    install_interceptor()
+
 __all__ = [
+    # Settings and helper
+    "settings",
+    "credential",
+    "init",
     # Client
     "AgentSecrets",
     # Errors

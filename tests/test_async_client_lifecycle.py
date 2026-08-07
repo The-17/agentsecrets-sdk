@@ -43,8 +43,9 @@ class TestAclose:
 
     async def test_aclose_clears_auth(self, mock_auth) -> None:
         client = AsyncAgentSecrets(auto_start=False)
-        with patch("agentsecrets.client._async_call", new=AsyncMock()):
-            await client.call(URL, bearer="KEY")
+        # call() no longer resolves auth under binary delegation; exercise the
+        # optional warm-up path directly so there is an _auth to clear.
+        client._ensure_auth()
         assert client._auth is not None
 
         await client.aclose()
@@ -136,10 +137,10 @@ class TestAsyncDelegation:
             await client.call(URL, bearer="STRIPE_KEY")
 
         mock_call.assert_awaited_once()
-        # port comes from resolved auth; url is the first positional after port
+        # Under binary delegation the URL is the first positional argument
+        # (no proxy port on the call path).
         args, kwargs = mock_call.await_args
-        assert args[0] == 8765
-        assert args[1] == URL
+        assert args[0] == URL
         assert kwargs["bearer"] == "STRIPE_KEY"
 
     async def test_call_resolves_agent_identity(self, mock_auth) -> None:

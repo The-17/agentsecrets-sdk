@@ -136,8 +136,9 @@ class TestAgentResolutionSync:
 
         args = mock_call.call_args.args
         kwargs = mock_call.call_args.kwargs
-        assert args[0] == 8765  # auth.port
-        assert args[1] == URL
+        # Under binary delegation the URL is the first positional argument;
+        # there is no proxy port on the call path anymore.
+        assert args[0] == URL
         assert kwargs["method"] == "POST"
         assert kwargs["body"] == {"amount": 1000}
         assert kwargs["bearer"] == "STRIPE_KEY"

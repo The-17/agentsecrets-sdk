@@ -1,208 +1,252 @@
-"""Regression tests for the real ``call()`` / ``async_call()`` HTTP round-trip.
+"""End-to-end tests for ``call()`` / ``async_call()`` over the binary delegation.
 
-Unlike ``test_call.py`` (which only covers ``_build_proxy_headers`` and
-``_map_proxy_error`` in isolation), these tests drive the full network path
-through ``pytest-httpx`` so the wire contract with the local proxy is locked
-down before any refactor:
+Under Option B1 ``call()`` does not speak HTTP to the proxy; it runs
+``agentsecrets call`` as a subprocess (mirroring :mod:`agentsecrets.spawn`).
+These tests mock the subprocess boundary — ``subprocess.run`` for the sync
+path and ``asyncio.create_subprocess_exec`` for the async path — so the full
+argv-build -> run -> parse/​error-map pipeline is exercised without a real
+binary, proxy, or network:
 
-* request goes to ``http://localhost:{port}/proxy``
-* the HTTP method mirrors the *target* method (GET call -> GET to proxy)
-* dict bodies are JSON-encoded and ``Content-Type`` is set; bytes pass through
-* the session token is attached as ``X-AS-Session-Token`` when present
-* ``AgentSecretsResponse`` is built faithfully (status/headers/body/redacted)
-* proxy error statuses raise the mapped SDK exceptions
+* the invoked argv is ``[binary, "call", "--url", TARGET, ...]``
+* dict bodies are JSON-encoded; bytes/str pass through as ``--body``
+* stdout ``HTTP <code>\\n\\n<body>`` becomes a faithful ``AgentSecretsResponse``
+* the ``[REDACTED_BY_AGENTSECRETS]`` marker sets ``response.redacted``
+* non-zero exit maps proxy stderr text to the right SDK exception
+* a subprocess timeout surfaces as ``CLIError``
 
-The session token reader is patched to ``None`` by default so assertions do
-not depend on the developer's real ``~/.agentsecrets/keyring.json``.
+The pure helpers (``_build_call_args``/``_parse_call_stdout``/``_map_call_error``)
+are unit-tested in ``test_call.py``.
 """
 
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+import subprocess
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agentsecrets import call as call_mod
 from agentsecrets.call import async_call, call
-from agentsecrets.errors import DomainNotAllowed, SecretNotFound, UpstreamError
+from agentsecrets.errors import CLIError, DomainNotAllowed, SecretNotFound, UpstreamError
 from agentsecrets.models import AgentSecretsResponse
 
-PORT = 8765
-PROXY_URL = f"http://localhost:{PORT}/proxy"
+BINARY = "/usr/local/bin/agentsecrets"
 TARGET = "https://api.stripe.com/v1/balance"
 
 
-@pytest.fixture(autouse=True)
-def _no_session_token():
-    """Default every test to *no* session token for deterministic headers."""
-    with patch.object(call_mod, "_get_session_token", return_value=None):
-        yield
+# ---------------------------------------------------------------------------
+# Sync helpers
+# ---------------------------------------------------------------------------
 
 
-class TestCallHTTP:
-    """Synchronous ``call()`` wire behaviour."""
+def _run_result(*, returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+    """Build a fake ``subprocess.run`` CompletedProcess-like result."""
+    result = MagicMock()
+    result.returncode = returncode
+    result.stdout = stdout
+    result.stderr = stderr
+    return result
 
-    def test_posts_to_proxy_url_with_target_headers(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="GET", json={"ok": True})
 
-        resp = call(PORT, TARGET, bearer="STRIPE_KEY")
+def _patch_sync(result: MagicMock):
+    """Patch ``find_binary`` + ``subprocess.run`` for the sync ``call()`` path."""
+    return patch("agentsecrets.call.find_binary", return_value=BINARY), patch(
+        "agentsecrets.call.subprocess.run", return_value=result
+    )
 
-        req = httpx_mock.get_request()
-        assert req is not None
-        assert str(req.url) == PROXY_URL
-        assert req.method == "GET"
-        assert req.headers["X-AS-Target-URL"] == TARGET
-        assert req.headers["X-AS-Method"] == "GET"
-        assert req.headers["X-AS-Inject-Bearer"] == "STRIPE_KEY"
+
+def _argv_of(mock_run: MagicMock) -> list[str]:
+    """Extract the argv list ``[binary, *args]`` passed to ``subprocess.run``."""
+    return mock_run.call_args.args[0]
+
+
+class TestCallDelegation:
+    """Synchronous ``call()`` subprocess behaviour."""
+
+    def test_invokes_binary_with_call_argv(self) -> None:
+        find_patch, run_patch = _patch_sync(_run_result(stdout='HTTP 200\n\n{"ok": true}'))
+        with find_patch, run_patch as mock_run:
+            resp = call(TARGET, bearer="STRIPE_KEY")
+
+        argv = _argv_of(mock_run)
+        assert argv[0] == BINARY
+        assert argv[1] == "call"
+        assert "--url" in argv and TARGET in argv
+        assert "--bearer" in argv and "STRIPE_KEY" in argv
         assert isinstance(resp, AgentSecretsResponse)
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
 
-    def test_method_mirrors_target_method(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="POST", json={})
+    def test_method_is_forwarded_uppercased(self) -> None:
+        find_patch, run_patch = _patch_sync(_run_result(stdout="HTTP 200\n\n{}"))
+        with find_patch, run_patch as mock_run:
+            call(TARGET, method="post", bearer="K")
 
-        call(PORT, TARGET, method="post", bearer="K")
+        argv = _argv_of(mock_run)
+        assert argv[argv.index("--method") + 1] == "POST"
 
-        req = httpx_mock.get_request()
-        assert req.method == "POST"
-        assert req.headers["X-AS-Method"] == "POST"
+    def test_dict_body_is_json_encoded(self) -> None:
+        find_patch, run_patch = _patch_sync(_run_result(stdout="HTTP 200\n\n{}"))
+        with find_patch, run_patch as mock_run:
+            call(TARGET, method="POST", body={"amount": 1000, "currency": "usd"})
 
-    def test_dict_body_is_json_encoded(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="POST", json={})
+        argv = _argv_of(mock_run)
+        body_arg = argv[argv.index("--body") + 1]
+        assert json.loads(body_arg) == {"amount": 1000, "currency": "usd"}
 
-        call(PORT, TARGET, method="POST", body={"amount": 1000, "currency": "usd"})
+    def test_bytes_body_is_decoded(self) -> None:
+        find_patch, run_patch = _patch_sync(_run_result(stdout="HTTP 200\n\n{}"))
+        with find_patch, run_patch as mock_run:
+            call(TARGET, method="POST", body=b"raw-payload")
 
-        req = httpx_mock.get_request()
-        assert json.loads(req.content) == {"amount": 1000, "currency": "usd"}
-        assert req.headers["content-type"] == "application/json"
+        argv = _argv_of(mock_run)
+        assert argv[argv.index("--body") + 1] == "raw-payload"
 
-    def test_bytes_body_passes_through_untouched(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="POST", json={})
+    def test_agent_token_becomes_token_flag(self) -> None:
+        find_patch, run_patch = _patch_sync(_run_result(stdout="HTTP 200\n\n{}"))
+        with find_patch, run_patch as mock_run:
+            call(TARGET, bearer="K", agent_token="agt_xyz")
 
-        call(PORT, TARGET, method="POST", body=b"raw-payload")
+        argv = _argv_of(mock_run)
+        assert argv[argv.index("--token") + 1] == "agt_xyz"
 
-        req = httpx_mock.get_request()
-        assert req.content == b"raw-payload"
-        # We do not force a Content-Type for raw bytes.
-        assert "content-type" not in req.headers
-
-    def test_extra_headers_are_forwarded(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="GET", json={})
-
-        call(PORT, TARGET, headers={"X-Trace-Id": "abc123"})
-
-        req = httpx_mock.get_request()
-        assert req.headers["X-Trace-Id"] == "abc123"
-
-    def test_session_token_attached_when_present(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="GET", json={})
-
-        with patch.object(call_mod, "_get_session_token", return_value="sess-xyz"):
-            call(PORT, TARGET, bearer="K")
-
-        req = httpx_mock.get_request()
-        assert req.headers["X-AS-Session-Token"] == "sess-xyz"
-
-    def test_session_token_absent_when_none(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="GET", json={})
-
-        call(PORT, TARGET, bearer="K")
-
-        req = httpx_mock.get_request()
-        assert "X-AS-Session-Token" not in req.headers
-
-    def test_response_fields_are_populated(self, httpx_mock) -> None:
-        httpx_mock.add_response(
-            url=PROXY_URL,
-            method="GET",
-            status_code=201,
-            headers={"X-Upstream": "yes"},
-            content=b'{"created": true}',
+    def test_response_fields_are_populated(self) -> None:
+        find_patch, run_patch = _patch_sync(
+            _run_result(stdout='HTTP 201\n\n{"created": true}')
         )
-
-        resp = call(PORT, TARGET, bearer="K")
+        with find_patch, run_patch:
+            resp = call(TARGET, bearer="K")
 
         assert resp.status_code == 201
-        # NOTE: response.headers is a plain dict built from httpx's .items(),
-        # which lowercases header names. It is NOT case-insensitive like
-        # httpx.Headers — response.headers["X-Upstream"] would KeyError.
-        # (Flagged for Phase 4: consider a case-insensitive mapping.)
-        assert resp.headers["x-upstream"] == "yes"
+        assert resp.headers == {}  # binary emits no response headers in text mode
         assert resp.body == b'{"created": true}'
         assert resp.text == '{"created": true}'
         assert resp.redacted is False
         assert resp.duration_ms >= 0
 
-    def test_redacted_flag_set_when_marker_present(self, httpx_mock) -> None:
-        httpx_mock.add_response(
-            url=PROXY_URL,
-            method="GET",
-            content=b"key is [REDACTED_BY_AGENTSECRETS] here",
+    def test_redacted_flag_set_when_marker_present(self) -> None:
+        find_patch, run_patch = _patch_sync(
+            _run_result(stdout="HTTP 200\n\nkey is [REDACTED_BY_AGENTSECRETS] here")
         )
-
-        resp = call(PORT, TARGET, bearer="K")
+        with find_patch, run_patch:
+            resp = call(TARGET, bearer="K")
 
         assert resp.redacted is True
 
-    def test_403_raises_domain_not_allowed(self, httpx_mock) -> None:
-        httpx_mock.add_response(
-            url=PROXY_URL,
-            method="GET",
-            status_code=403,
-            json={"error": "domain_not_in_allowlist", "domain": "api.stripe.com"},
+    def test_domain_block_raises_domain_not_allowed(self) -> None:
+        find_patch, run_patch = _patch_sync(
+            _run_result(
+                returncode=1,
+                stderr="domain 'api.stripe.com' is not in the workspace allowlist",
+            )
         )
-
-        with pytest.raises(DomainNotAllowed) as excinfo:
-            call(PORT, TARGET, bearer="K")
+        with find_patch, run_patch:
+            with pytest.raises(DomainNotAllowed) as excinfo:
+                call(TARGET, bearer="K")
         assert excinfo.value.domain == "api.stripe.com"
 
-    def test_502_secret_not_found_raises_secret_not_found(self, httpx_mock) -> None:
-        httpx_mock.add_response(
-            url=PROXY_URL,
-            method="GET",
-            status_code=502,
-            json={"error": "secret 'STRIPE_KEY' not found in keychain — run set"},
+    def test_secret_not_found_raises_secret_not_found(self) -> None:
+        find_patch, run_patch = _patch_sync(
+            _run_result(
+                returncode=1,
+                stderr="secret 'STRIPE_KEY' not found in keychain — run set",
+            )
         )
-
-        with pytest.raises(SecretNotFound) as excinfo:
-            call(PORT, TARGET, bearer="STRIPE_KEY")
+        with find_patch, run_patch:
+            with pytest.raises(SecretNotFound) as excinfo:
+                call(TARGET, bearer="STRIPE_KEY")
         assert excinfo.value.key == "STRIPE_KEY"
 
-    def test_502_generic_raises_upstream_error(self, httpx_mock) -> None:
-        httpx_mock.add_response(
-            url=PROXY_URL,
-            method="GET",
-            status_code=502,
-            json={"error": "upstream connection refused"},
+    def test_upstream_error_raises_upstream(self) -> None:
+        find_patch, run_patch = _patch_sync(
+            _run_result(returncode=1, stderr="upstream connection refused")
         )
-
-        with pytest.raises(UpstreamError) as excinfo:
-            call(PORT, TARGET, bearer="K")
+        with find_patch, run_patch:
+            with pytest.raises(UpstreamError) as excinfo:
+                call(TARGET, bearer="K")
         assert excinfo.value.status_code == 502
 
+    def test_generic_failure_raises_cli_error(self) -> None:
+        find_patch, run_patch = _patch_sync(
+            _run_result(returncode=3, stderr="unexpected boom")
+        )
+        with find_patch, run_patch:
+            with pytest.raises(CLIError) as excinfo:
+                call(TARGET, bearer="K")
+        assert excinfo.value.exit_code == 3
 
-class TestAsyncCallHTTP:
+    def test_timeout_raises_cli_error(self) -> None:
+        find_patch = patch("agentsecrets.call.find_binary", return_value=BINARY)
+        run_patch = patch(
+            "agentsecrets.call.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="call", timeout=1.0),
+        )
+        with find_patch, run_patch:
+            with pytest.raises(CLIError):
+                call(TARGET, bearer="K", timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Async helpers
+# ---------------------------------------------------------------------------
+
+
+def _fake_proc(*, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> MagicMock:
+    """Build a fake asyncio subprocess whose ``communicate()`` is awaitable."""
+    proc = MagicMock()
+    proc.returncode = returncode
+
+    async def _communicate() -> tuple[bytes, bytes]:
+        return stdout, stderr
+
+    proc.communicate = _communicate
+    return proc
+
+
+def _patch_async(proc: MagicMock):
+    """Patch ``find_binary`` + ``create_subprocess_exec`` for the async path."""
+    async def _create(*_args, **_kwargs):
+        return proc
+
+    return patch("agentsecrets.call.find_binary", return_value=BINARY), patch(
+        "agentsecrets.call.asyncio.create_subprocess_exec", side_effect=_create
+    )
+
+
+class TestAsyncCallDelegation:
     """``async_call()`` mirrors the sync path (asyncio_mode = auto)."""
 
-    async def test_async_round_trip(self, httpx_mock) -> None:
-        httpx_mock.add_response(url=PROXY_URL, method="GET", json={"ok": True})
+    async def test_async_round_trip(self) -> None:
+        find_patch, exec_patch = _patch_async(
+            _fake_proc(stdout=b'HTTP 200\n\n{"ok": true}')
+        )
+        with find_patch, exec_patch as mock_exec:
+            resp = await async_call(TARGET, bearer="OPENAI_KEY")
 
-        resp = await async_call(PORT, TARGET, bearer="OPENAI_KEY")
-
-        req = httpx_mock.get_request()
-        assert str(req.url) == PROXY_URL
-        assert req.headers["X-AS-Inject-Bearer"] == "OPENAI_KEY"
+        # create_subprocess_exec(binary, *args, ...) -> args[0] is the binary.
+        exec_args = mock_exec.call_args.args
+        assert exec_args[0] == BINARY
+        assert "call" in exec_args
+        assert "--bearer" in exec_args and "OPENAI_KEY" in exec_args
         assert resp.json() == {"ok": True}
 
-    async def test_async_502_secret_not_found(self, httpx_mock) -> None:
-        httpx_mock.add_response(
-            url=PROXY_URL,
-            method="GET",
-            status_code=502,
-            json={"error": "secret 'OPENAI_KEY' not found in keychain"},
+    async def test_async_secret_not_found(self) -> None:
+        find_patch, exec_patch = _patch_async(
+            _fake_proc(returncode=1, stderr=b"secret 'OPENAI_KEY' not found in keychain")
         )
-
-        with pytest.raises(SecretNotFound) as excinfo:
-            await async_call(PORT, TARGET, bearer="OPENAI_KEY")
+        with find_patch, exec_patch:
+            with pytest.raises(SecretNotFound) as excinfo:
+                await async_call(TARGET, bearer="OPENAI_KEY")
         assert excinfo.value.key == "OPENAI_KEY"
+
+    async def test_async_domain_block(self) -> None:
+        find_patch, exec_patch = _patch_async(
+            _fake_proc(
+                returncode=1,
+                stderr=b"domain 'api.openai.com' is not in the workspace allowlist",
+            )
+        )
+        with find_patch, exec_patch:
+            with pytest.raises(DomainNotAllowed) as excinfo:
+                await async_call(TARGET, bearer="OPENAI_KEY")
+        assert excinfo.value.domain == "api.openai.com"

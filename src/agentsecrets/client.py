@@ -92,7 +92,11 @@ class _BaseClient:
     project:
         Active project name (or ``AGENTSECRETS_PROJECT``).
     auto_start:
-        If ``True``, start the proxy automatically when needed.
+        If ``True``, warm up a persistent proxy when needed. Calls work
+        without it — the binary starts a transient proxy per call — but a
+        running proxy is faster.
+    timeout:
+        Default timeout in seconds for the delegated ``agentsecrets`` binary.
     """
 
     def __init__(
@@ -106,6 +110,7 @@ class _BaseClient:
         environment: str | None = None,
         agent: Any | None = None,
         agent_token: str | None = None,
+        timeout: float = 30.0,
     ) -> None:
         self._port = port or int(os.environ.get("AGENTSECRETS_PORT", DEFAULT_PORT))
         self._workspace = workspace or os.environ.get("AGENTSECRETS_WORKSPACE")
@@ -113,6 +118,7 @@ class _BaseClient:
         self._auto_start = auto_start
         self._agent = agent
         self._agent_token = agent_token
+        self._timeout = timeout
         self._is_closed = False
 
         from .config import settings
@@ -156,7 +162,12 @@ class _BaseClient:
             )
 
     def _ensure_auth(self) -> AuthContext:
-        """Resolve authentication lazily on first use."""
+        """Warm up a persistent proxy, lazily, on first use.
+
+        Delegation does not *require* this — the binary starts a transient
+        proxy per call when none is running — but warming one up once makes
+        subsequent calls faster. Kept off the :meth:`call` critical path.
+        """
         if self._auth is None:
             self._auth = resolve(self._port, auto_start_proxy=self._auto_start)
         return self._auth
@@ -183,19 +194,19 @@ class _BaseClient:
         agent_token: str | None = None,
         timeout: float = 30.0,
     ) -> AgentSecretsResponse:
-        """Make an authenticated API call through the proxy.
+        """Make an authenticated API call.
 
-        See :func:`agentsecrets.call.call` for full parameter docs.
+        The call is resolved by the active backend (currently the local
+        ``agentsecrets`` binary). See :func:`agentsecrets.call.call` for full
+        parameter docs.
         """
         self._ensure_open()
-        auth = self._ensure_auth()
 
         resolved_agent_id, resolved_agent_token = _resolve_agent_identity(
             agent, agent_id, agent_token, self._agent, self._agent_token
         )
 
         return _call(
-            auth.port,
             url,
             method=method,
             body=body,
@@ -231,14 +242,12 @@ class _BaseClient:
     ) -> AgentSecretsResponse:
         """Async variant of :meth:`call`."""
         self._ensure_open()
-        auth = self._ensure_auth()
 
         resolved_agent_id, resolved_agent_token = _resolve_agent_identity(
             agent, agent_id, agent_token, self._agent, self._agent_token
         )
 
         return await _async_call(
-            auth.port,
             url,
             method=method,
             body=body,
@@ -357,7 +366,7 @@ class _BaseClient:
 
 
 class AgentSecrets(_BaseClient):
-    """Synchronous AgentSecrets client — the default entry point.
+    """Synchronous AgentSecrets clientm, the default entry point.
 
     All I/O is synchronous: :meth:`call` and :meth:`spawn` block until they
     return. Async variants (:meth:`async_call`, :meth:`spawn_async`) are

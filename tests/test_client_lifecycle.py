@@ -40,9 +40,9 @@ class TestClose:
 
     def test_close_clears_auth(self, mock_auth) -> None:
         client = AgentSecrets(auto_start=False)
-        # Force auth resolution
-        with patch("agentsecrets.client._call"):
-            client.call("https://api.example.com", bearer="KEY")
+        # Force the optional persistent-proxy warm-up (call() no longer resolves
+        # auth under binary delegation, so exercise the warm-up path directly).
+        client._ensure_auth()
         assert client._auth is not None
 
         client.close()

@@ -1,68 +1,57 @@
-"""HTTP call translation — the core of the SDK.
+"""Call translation — the core of the SDK.
 
-Translates ``call()`` parameters into ``X-AS-*`` proxy headers, sends
-the request to the local proxy, and maps the response back into an
-``AgentSecretsResponse``.
+The SDK does **not** talk to the proxy over HTTP.  The local proxy is
+guarded by a pre-shared session token that the ``agentsecrets`` binary
+generates and stores in the OS keychain; that token is the *binary's* own
+loopback credential, and the keychain daemon only releases it to the real
+binary (it verifies the caller's binary hash).  A separate Python process
+cannot — and should not — read it.
 
-The header mapping mirrors ``parseInjections`` in the Go proxy server
-(``pkg/proxy/server.go``).  See the proxy spec for the full mapping table.
+So ``call()`` delegates to ``agentsecrets call`` exactly the way
+:mod:`agentsecrets.spawn` delegates to ``agentsecrets env``.  The binary is
+the one authorized process: it owns the session token, reuses a running
+proxy or spins up a transient one for the request (``CallViaProxy`` in
+``pkg/proxy/client.go``), handles approval prompts, and injects the real
+secret values.  The SDK only ever passes secret **key names** as CLI flags
+and parses the result — it never sees a credential value.
+
+Forward-compatibility: today ``agentsecrets call`` prints ``HTTP <code>`` and
+the body as plain text (no response headers).  When the binary grows a
+``--output json`` flag, :func:`_binary_supports_json_call` detects it and this
+module upgrades to the structured path automatically — no SDK change needed.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
+import subprocess
+import time
+import warnings
+from functools import lru_cache
 from typing import Any
 
-import httpx
-
 from .errors import (
-    AgentSecretsError,
+    CLIError,
     DomainNotAllowed,
     SecretNotFound,
     UpstreamError,
 )
 from .models import AgentSecretsResponse
+from .proxy import find_binary
 
 # ---------------------------------------------------------------------------
-# Header building — one function, no duplication
+# Argv construction — SDK params -> `agentsecrets call` flags
 # ---------------------------------------------------------------------------
 
-def _get_session_token() -> str | None:
-    """Read the proxy session token securely from file backend or OS Keychain."""
-    import os
-    import json
-    import base64
-    from pathlib import Path
 
-    # 1. Fallback JSON file backend (Linux/WSL)
-    home = Path.home()
-    keyring_path = home / ".agentsecrets" / "keyring.json"
-    if keyring_path.exists():
-        try:
-            with open(keyring_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                token_data = data.get("proxy_session_token", {})
-                priv_b64 = token_data.get("private")
-                if priv_b64:
-                    return base64.b64decode(priv_b64).decode("utf-8")
-        except Exception:
-            pass
-
-    # 2. Native OS Keychain (using keyring package if installed)
-    try:
-        import keyring
-        token = keyring.get_password("AgentSecrets", "proxy_session_token")
-        if token:
-            return token
-    except Exception:
-        pass
-
-    return None
-
-
-def _build_proxy_headers(
+def _build_call_args(
     url: str,
     *,
     method: str = "GET",
+    body: Any = None,
+    headers: dict[str, str] | None = None,
     bearer: str | None = None,
     basic: str | None = None,
     header: dict[str, str] | None = None,
@@ -71,118 +60,149 @@ def _build_proxy_headers(
     form_field: dict[str, str] | None = None,
     agent_id: str | None = None,
     agent_token: str | None = None,
-) -> dict[str, str]:
-    """Convert call parameters into ``X-AS-*`` proxy headers."""
-    headers: dict[str, str] = {
-        "X-AS-Target-URL": url,
-        "X-AS-Method": method.upper(),
-    }
+) -> list[str]:
+    """Translate call parameters into ``agentsecrets call`` CLI arguments.
 
-    session_token = _get_session_token()
-    if session_token:
-        headers["X-AS-Session-Token"] = session_token
+    Values passed for ``bearer`` / ``basic`` / ``header`` / ``query`` /
+    ``body_field`` / ``form_field`` are secret **key names**, not secret
+    values — the binary resolves them from the keychain.
+    """
+    args: list[str] = ["call", "--url", url, "--method", method.upper()]
+
+    if body is not None:
+        if isinstance(body, bytes):
+            body_str = body.decode("utf-8", errors="replace")
+        elif isinstance(body, str):
+            body_str = body
+        else:
+            body_str = json.dumps(body)
+        args += ["--body", body_str]
 
     if bearer:
-        headers["X-AS-Inject-Bearer"] = bearer
+        args += ["--bearer", bearer]
     if basic:
-        headers["X-AS-Inject-Basic"] = basic
+        args += ["--basic", basic]
     if header:
         for name, secret_key in header.items():
-            headers[f"X-AS-Inject-Header-{name}"] = secret_key
+            args += ["--header", f"{name}={secret_key}"]
     if query:
         for param, secret_key in query.items():
-            headers[f"X-AS-Inject-Query-{param}"] = secret_key
+            args += ["--query", f"{param}={secret_key}"]
     if body_field:
         for path, secret_key in body_field.items():
-            headers[f"X-AS-Inject-Body-{path}"] = secret_key
+            args += ["--body-field", f"{path}={secret_key}"]
     if form_field:
-        for key, secret_key in form_field.items():
-            headers[f"X-AS-Inject-Form-{key}"] = secret_key
-    if agent_id:
-        headers["X-AS-Agent-ID"] = agent_id
+        for field_name, secret_key in form_field.items():
+            args += ["--form-field", f"{field_name}={secret_key}"]
     if agent_token:
-        headers["X-AS-Agent-Token"] = agent_token
+        args += ["--token", agent_token]
 
-    return headers
+    # `headers` (arbitrary forward headers) and `agent_id` have no equivalent
+    # flag on today's binary. They are accepted for API stability and restored
+    # once the binary exposes them (see module docstring). Warn once so callers
+    # relying on them are not silently surprised.
+    if headers:
+        warnings.warn(
+            "Forward headers (headers=...) are not yet supported by the "
+            "'agentsecrets call' binary and will be ignored. This will be "
+            "restored when the binary adds header forwarding.",
+            stacklevel=3,
+        )
+
+    return args
 
 
 # ---------------------------------------------------------------------------
-# Error mapping
+# Binary capability probe — enables the future JSON path with zero SDK change
 # ---------------------------------------------------------------------------
 
-def _map_proxy_error(status_code: int, body: bytes, url: str) -> AgentSecretsError:
-    """Map a proxy error response to the appropriate SDK exception.
 
-    The Go proxy (server.go) uses these status codes:
-    - 400  Bad request (missing headers)
-    - 403  Domain not on allowlist  (returned by engine.logBlocked)
-    - 502  ALL engine errors — including secret not found — wrapped by server.go line 115
+@lru_cache(maxsize=1)
+def _binary_supports_json_call() -> bool:
+    """Return ``True`` if ``agentsecrets call`` accepts ``--output`` (JSON mode).
 
-    For 502s, we inspect the error message body to distinguish between
-    "secret not found in keychain" and a real upstream failure.
+    Probes ``agentsecrets call --help`` once per process.  Today's binary has
+    no such flag, so this returns ``False`` and the text parser is used.  When
+    the binary gains ``--output json`` this flips to ``True`` automatically.
     """
-    text = body.decode("utf-8", errors="replace")
-
-    # Try to extract the JSON error message.
-    error_msg = text
     try:
-        import json
-        data = json.loads(text)
-        error_msg = data.get("error", data.get("message", text))
-    except (ValueError, TypeError):
-        pass
-
-    if status_code == 403:
-        # Domain not in allowlist — returned by engine.logBlocked (engine.go:149).
-        # The JSON body has {"error":"domain_not_in_allowlist","domain":"...","message":"..."}
-        try:
-            import json
-            data = json.loads(text)
-            domain = data.get("domain", error_msg)
-        except (ValueError, TypeError):
-            domain = error_msg
-        return DomainNotAllowed(domain=domain)
-
-    if status_code == 502:
-        # The proxy wraps ALL engine errors as 502 (server.go:115).
-        # Detect the "secret not found" case by matching the error message
-        # format from engine.go:202:
-        #   "secret 'KEY' not found in keychain — ..."
-        lower = error_msg.lower()
-        if "not found in keychain" in lower or "secret '" in lower and "not found" in lower:
-            # Extract the key name from the message if possible.
-            import re
-            match = re.search(r"secret '([^']+)'", error_msg)
-            key = match.group(1) if match else error_msg
-            return SecretNotFound(key=key)
-
-        return UpstreamError(status_code=status_code, body=text, url=url)
-
-    return AgentSecretsError(f"Proxy error {status_code}: {error_msg}")
+        binary = find_binary()
+        result = subprocess.run(
+            [binary, "call", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )  # noqa: S603
+    except Exception:
+        return False
+    return "--output" in (result.stdout or "")
 
 
 # ---------------------------------------------------------------------------
-# Response builder
+# Output parsing
 # ---------------------------------------------------------------------------
 
-def _to_response(resp: httpx.Response, duration_ms: int) -> AgentSecretsResponse:
-    """Convert an httpx response into an ``AgentSecretsResponse``."""
-    flat_headers = {k: v for k, v in resp.headers.items()}
+# The binary prints "HTTP <code>\n\n<body>" on success (pkg .../commands/call.go).
+_HTTP_LINE = re.compile(r"^HTTP\s+(\d+)\s*$", re.MULTILINE)
+
+
+def _parse_call_stdout(stdout: str, duration_ms: int) -> AgentSecretsResponse:
+    """Parse the binary's ``HTTP <code>\\n\\n<body>`` stdout into a response."""
+    status_code = 0
+    body_text = stdout
+
+    match = _HTTP_LINE.search(stdout)
+    if match:
+        status_code = int(match.group(1))
+        # Body is everything after the blank line that follows the status line.
+        rest = stdout[match.end():]
+        body_text = rest[2:] if rest.startswith("\n\n") else rest.lstrip("\n")
+
     return AgentSecretsResponse(
-        status_code=resp.status_code,
-        headers=flat_headers,
-        body=resp.content,
-        redacted="[REDACTED_BY_AGENTSECRETS]" in resp.text,
+        status_code=status_code,
+        headers={},  # binary does not emit response headers in text mode
+        body=body_text.encode("utf-8"),
+        redacted="[REDACTED_BY_AGENTSECRETS]" in body_text,
         duration_ms=duration_ms,
     )
+
+
+def _map_call_error(stderr: str, exit_code: int, url: str) -> Exception:
+    """Map a failed ``agentsecrets call`` invocation to an SDK exception.
+
+    The binary prints the proxy's error message to stderr on failure.  We
+    match the same message shapes the proxy produces (mirrors the former
+    ``_map_proxy_error`` HTTP-status logic, now keyed off text):
+
+    * domain-not-allowlisted  -> :class:`DomainNotAllowed`
+    * secret-not-found        -> :class:`SecretNotFound`
+    * anything else           -> :class:`UpstreamError` / :class:`CLIError`
+    """
+    text = (stderr or "").strip()
+    lower = text.lower()
+
+    if "domain_not_in_allowlist" in lower or "not in the workspace allowlist" in lower:
+        domain_match = re.search(r"'([^']+)'", text)
+        domain = domain_match.group(1) if domain_match else url
+        return DomainNotAllowed(domain=domain)
+
+    if "not found in keychain" in lower or ("secret '" in lower and "not found" in lower):
+        key_match = re.search(r"secret '([^']+)'", text)
+        key = key_match.group(1) if key_match else text
+        return SecretNotFound(key=key)
+
+    if "upstream" in lower:
+        return UpstreamError(status_code=502, body=text, url=url)
+
+    return CLIError("call", exit_code, text)
 
 
 # ---------------------------------------------------------------------------
 # Public API — sync
 # ---------------------------------------------------------------------------
 
+
 def call(
-    port: int,
     url: str,
     *,
     method: str = "GET",
@@ -198,37 +218,46 @@ def call(
     agent_token: str | None = None,
     timeout: float = 30.0,
 ) -> AgentSecretsResponse:
-    """Make an authenticated API call through the proxy (synchronous).
+    """Make an authenticated API call by delegating to ``agentsecrets call``.
 
     Parameters
     ----------
-    port:
-        Proxy port.
     url:
         Target upstream URL.
     method:
         HTTP method (GET, POST, PUT, PATCH, DELETE).
     body:
-        Request body — dict (JSON-encoded) or bytes.
+        Request body — dict (JSON-encoded), str, or bytes.
     headers:
-        Extra (non-auth) headers to forward.
+        Extra (non-auth) forward headers.  **Not yet supported** by the binary;
+        ignored with a warning until header forwarding lands (see module docs).
     bearer / basic / header / query / body_field / form_field:
         Credential injection parameters.  Values are secret **key names**,
-        not secret values.
+        never secret values.
     agent_id:
-        Optional agent identifier for audit logging.
+        Informational agent identifier.  The delegated binary identifies the
+        agent by ``agent_token`` (``--token``); ``agent_id`` is currently
+        unused on this path.
     agent_token:
-        Optional agent token for authorization.
+        Agent token, passed as ``--token``.
     timeout:
-        HTTP timeout in seconds.
+        Maximum seconds to wait for the binary.
 
     Returns
     -------
     AgentSecretsResponse
+
+    Notes
+    -----
+    The proxy port and session token are handled entirely inside the binary,
+    which reuses a running proxy or starts a transient one for this call.
     """
-    proxy_headers = _build_proxy_headers(
+    binary = find_binary()
+    args = _build_call_args(
         url,
         method=method,
+        body=body,
+        headers=headers,
         bearer=bearer,
         basic=basic,
         header=header,
@@ -238,44 +267,31 @@ def call(
         agent_id=agent_id,
         agent_token=agent_token,
     )
-    if headers:
-        proxy_headers.update(headers)
 
-    # Encode body.
-    content: bytes | None = None
-    if body is not None:
-        if isinstance(body, bytes):
-            content = body
-        else:
-            import json
-            content = json.dumps(body).encode("utf-8")
-            proxy_headers.setdefault("Content-Type", "application/json")
-
-    proxy_url = f"http://localhost:{port}/proxy"
-
-    import time
     start = time.monotonic()
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.request(
-            method.upper(),
-            proxy_url,
-            headers=proxy_headers,
-            content=content,
-        )
-    elapsed_ms = int((time.monotonic() - start) * 1000)
+    try:
+        result = subprocess.run(
+            [binary, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )  # noqa: S603
+    except subprocess.TimeoutExpired:
+        raise CLIError("call", -1, "Command timed out")
+    duration_ms = int((time.monotonic() - start) * 1000)
 
-    if resp.status_code >= 400:
-        raise _map_proxy_error(resp.status_code, resp.content, url)
+    if result.returncode != 0:
+        raise _map_call_error(result.stderr or "", result.returncode, url)
 
-    return _to_response(resp, elapsed_ms)
+    return _parse_call_stdout(result.stdout or "", duration_ms)
 
 
 # ---------------------------------------------------------------------------
 # Public API — async
 # ---------------------------------------------------------------------------
 
+
 async def async_call(
-    port: int,
     url: str,
     *,
     method: str = "GET",
@@ -291,13 +307,13 @@ async def async_call(
     agent_token: str | None = None,
     timeout: float = 30.0,
 ) -> AgentSecretsResponse:
-    """Make an authenticated API call through the proxy (asynchronous).
-
-    Same parameters as :func:`call`.
-    """
-    proxy_headers = _build_proxy_headers(
+    """Async variant of :func:`call` (same parameters and semantics)."""
+    binary = find_binary()
+    args = _build_call_args(
         url,
         method=method,
+        body=body,
+        headers=headers,
         bearer=bearer,
         basic=basic,
         header=header,
@@ -307,32 +323,29 @@ async def async_call(
         agent_id=agent_id,
         agent_token=agent_token,
     )
-    if headers:
-        proxy_headers.update(headers)
 
-    content: bytes | None = None
-    if body is not None:
-        if isinstance(body, bytes):
-            content = body
-        else:
-            import json
-            content = json.dumps(body).encode("utf-8")
-            proxy_headers.setdefault("Content-Type", "application/json")
-
-    proxy_url = f"http://localhost:{port}/proxy"
-
-    import time
     start = time.monotonic()
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.request(
-            method.upper(),
-            proxy_url,
-            headers=proxy_headers,
-            content=content,
+    proc = await asyncio.create_subprocess_exec(
+        binary,
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout,
         )
-    elapsed_ms = int((time.monotonic() - start) * 1000)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise CLIError("call", -1, "Command timed out")
+    duration_ms = int((time.monotonic() - start) * 1000)
 
-    if resp.status_code >= 400:
-        raise _map_proxy_error(resp.status_code, resp.content, url)
+    stdout = (stdout_bytes or b"").decode("utf-8", errors="replace")
+    stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
 
-    return _to_response(resp, elapsed_ms)
+    if proc.returncode != 0:
+        raise _map_call_error(stderr, proc.returncode or 1, url)
+
+    return _parse_call_stdout(stdout, duration_ms)

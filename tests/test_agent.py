@@ -9,7 +9,7 @@ import pytest
 from agentsecrets import agent, AgentSecrets, AgentCapabilities, AgentToken, IssuedAgentToken
 from agentsecrets._cli import CLIResult
 from agentsecrets.agent import Agent
-from agentsecrets.call import _build_proxy_headers
+from agentsecrets.call import _build_call_args
 
 
 class TestAgentParsingAndCli:
@@ -184,21 +184,24 @@ class TestAgentParsingAndCli:
         )
 
 
-class TestAgentHeaderInjection:
-    """Verify that agent settings are correctly mapped to proxy headers."""
+class TestAgentIdentityInjection:
+    """Verify agent settings flow into the delegated ``agentsecrets call`` argv.
 
-    def test_build_headers_with_agent_token(self) -> None:
-        headers = _build_proxy_headers(
+    Under Option B1 the binary identifies the agent by its token (``--token``);
+    ``agent_id`` is informational and has no flag on today's ``call`` command.
+    """
+
+    def test_agent_token_becomes_token_flag(self) -> None:
+        args = _build_call_args(
             "https://api.stripe.com/v1/charges",
             agent_id="my-agent",
             agent_token="my-custom-token",
         )
-        assert headers["X-AS-Agent-ID"] == "my-agent"
-        assert headers["X-AS-Agent-Token"] == "my-custom-token"
+        assert args[args.index("--token") + 1] == "my-custom-token"
+        # agent_id has no dedicated flag today.
+        assert "my-agent" not in args
 
-    @patch("agentsecrets.client.AgentSecrets._ensure_auth")
-    def test_client_call_resolution_explicit_agent_string(self, mock_ensure_auth: MagicMock) -> None:
-        mock_ensure_auth.return_value = MagicMock(port=8765)
+    def test_client_call_resolution_explicit_agent_string(self) -> None:
         client = AgentSecrets(auto_start=False)
         with patch("agentsecrets.client._call") as mock_call:
             mock_call.return_value = MagicMock()
@@ -209,9 +212,7 @@ class TestAgentHeaderInjection:
             assert kwargs["agent_id"] == "my-agent-str"
             assert kwargs["agent_token"] == "MY-AGENT-STR_TOKEN"
 
-    @patch("agentsecrets.client.AgentSecrets._ensure_auth")
-    def test_client_call_resolution_explicit_agent_object(self, mock_ensure_auth: MagicMock) -> None:
-        mock_ensure_auth.return_value = MagicMock(port=8765)
+    def test_client_call_resolution_explicit_agent_object(self) -> None:
         client = AgentSecrets(auto_start=False)
         my_agent = Agent(name="my-custom-agent")
 
@@ -224,9 +225,7 @@ class TestAgentHeaderInjection:
             assert kwargs["agent_id"] == "my-custom-agent"
             assert kwargs["agent_token"] == "MY-CUSTOM-AGENT_TOKEN"
 
-    @patch("agentsecrets.client.AgentSecrets._ensure_auth")
-    def test_client_constructor_resolves_agent(self, mock_ensure_auth: MagicMock) -> None:
-        mock_ensure_auth.return_value = MagicMock(port=8765)
+    def test_client_constructor_resolves_agent(self) -> None:
         client = AgentSecrets(agent="client-agent", agent_token="client-token", auto_start=False)
         with patch("agentsecrets.client._call") as mock_call:
             mock_call.return_value = MagicMock()
@@ -236,9 +235,7 @@ class TestAgentHeaderInjection:
             assert kwargs["agent_id"] == "client-agent"
             assert kwargs["agent_token"] == "client-token"
 
-    @patch("agentsecrets.client.AgentSecrets._ensure_auth")
-    def test_agent_object_shortcut_call(self, mock_ensure_auth: MagicMock) -> None:
-        mock_ensure_auth.return_value = MagicMock(port=8765)
+    def test_agent_object_shortcut_call(self) -> None:
         my_agent = Agent(name="shortcut-agent")
 
         with patch("agentsecrets.client._call") as mock_call:

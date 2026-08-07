@@ -46,7 +46,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["agentsecrets"]
+packages = ["src/agentsecrets"]
 
 [tool.ruff]
 target-version = "py310"

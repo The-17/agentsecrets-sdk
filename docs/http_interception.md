@@ -32,7 +32,7 @@ print(credential.get("GITHUB_TOKEN")) # Output: "AS_SECRET_GITHUB_TOKEN"
 
 ## 2. Transparent Interception Flow
 
-When you call `init(intercept=True)`, the SDK dynamically patches the transport layers of both `requests` and `httpx` (sync + async).
+When you call `init()`, the SDK dynamically patches the transport layers of both `requests` and `httpx` (sync + async).
 
 ### Request Lifecycle
 
@@ -62,7 +62,7 @@ import stripe
 from agentsecrets import init, credential
 
 # Enable interception and target the development environment
-init(intercept=True, environment="development")
+init(environment="development")
 
 # Stripe stores "AS_SECRET_STRIPE_KEY" in memory
 stripe.api_key = credential.STRIPE_KEY
@@ -82,7 +82,7 @@ The OpenAI SDK uses `httpx` (async and sync) under the hood:
 from openai import OpenAI
 from agentsecrets import init, credential
 
-init(intercept=True, environment="production")
+init(environment="production")
 
 # OpenAI stores the placeholder in memory
 client = OpenAI(api_key=credential.OPENAI_API_KEY)
@@ -100,8 +100,29 @@ print(response.choices[0].message.content)
 from langchain_community.tools.tavily_search import TavilySearchResults
 from agentsecrets import init, credential
 
-init(intercept=True)
+init()
 
 # Tavily client uses requests under the hood and will be intercepted
 tavily_tool = TavilySearchResults(api_wrapper_api_key=credential.TAVILY_API_KEY)
+```
+
+---
+
+## 4. Programmatic Environment Variable Setup (Alternative)
+
+Instead of hardcoding raw placeholder strings in your terminal profile or `.env` files, you can use the `credential` helper to populate environment variables dynamically at program startup. This is the cleanest way to migrate third-party SDKs that default to environment variable configuration:
+
+```python
+import os
+import openai
+from agentsecrets import init, credential
+
+# Register the global interception hooks
+init()
+
+# Dynamically populate standard environment variables with placeholders
+os.environ["OPENAI_API_KEY"] = credential.OPENAI_API_KEY  # Dynamically yields "AS_SECRET_OPENAI_API_KEY"
+
+# OpenAI SDK automatically reads the secure placeholder and delegates requests to the proxy
+client = openai.OpenAI()
 ```

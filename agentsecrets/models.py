@@ -1,6 +1,6 @@
 """AgentSecrets SDK data models.
 
-All models are plain ``dataclasses`` — no ORMs, no schema libraries, no magic.
+All models are plain ``dataclasses`` — no ORMs, no schema libraries.
 They map 1:1 to the structures used by the AgentSecrets proxy and CLI.
 
 Zero-knowledge rule: ``AgentSecretsResponse`` and ``AuditEvent`` have **no**
@@ -12,7 +12,9 @@ from __future__ import annotations
 import json as _json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
+if TYPE_CHECKING:
+    from .agent import Agent
 
 # ---------------------------------------------------------------------------
 # Core proxy response
@@ -66,6 +68,14 @@ class AuditEvent:
     domain: str = ""
     reason: str = "-"
     redacted: bool = False
+    id: str = ""
+    environment: str = ""
+    identity_level: str = ""
+    resolution_path: str = ""
+    caller_role: str = ""
+    workspace_id: str = ""
+    project_id: str = ""
+    token_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +116,7 @@ class Project:
     id: str
     name: str
     workspace_id: str = ""
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +126,8 @@ class Member:
     email: str
     role: str
     user_id: str = ""
+    id: str = ""
+    status: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +205,8 @@ class AllowlistEntry:
     """A single domain on the workspace allowlist."""
 
     domain: str
+    added_by: str = ""
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -202,3 +217,39 @@ class AllowlistEvent:
     action: str
     domain: str
     user_email: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Agent Identity
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class AgentToken:
+    """An active token for an agent."""
+
+    id: str
+    agent_id: str
+    label: str
+    created_at: str
+    expires_at: str | None = None
+    last_used: str | None = None
+    status: str = "active"
+
+
+@dataclass(frozen=True)
+class IssuedAgentToken:
+    """A newly registered agent or issued token with the cleartext token value."""
+
+    agent: Agent
+    token: str
+    label: str = ""
+    expires_at: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentCapabilities:
+    """The allowed/denied capabilities (secrets policy) of an agent."""
+
+    allowed_secrets: list[str] = field(default_factory=list)
+    denied_secrets: list[str] = field(default_factory=list)
+

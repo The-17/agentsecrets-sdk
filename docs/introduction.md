@@ -67,6 +67,8 @@ agentsecrets workspace allowlist add api.stripe.com
 agentsecrets proxy start
 ```
 
+When you start the proxy daemon, it registers a secure session token inside your OS Keychain (or a local keyring file fallback). The SDK automatically retrieves this token and appends the `X-AS-Session-Token` header to validate communication with the proxy daemon.
+
 ---
 
 ## Quick Start
@@ -76,7 +78,7 @@ Using the SDK to call the Stripe API in a zero-knowledge way:
 ```python
 from agentsecrets import AgentSecrets
 
-# Instantiate the client (automatically resolves local proxy)
+# Instantiate the client (automatically resolves local proxy and session token)
 client = AgentSecrets()
 
 # Make the call using the key name "STRIPE_KEY"

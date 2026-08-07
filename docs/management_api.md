@@ -81,4 +81,18 @@ Control the background daemon and view audit logs.
 * **`logs(last: int = 100, status: str | None = None, secret: str | None = None)`**: 
   * Queries transaction audit logs.
   * Allows filtering by status (e.g. `BLOCKED`, `ALLOWED`) or by the specific secret key name used.
-  * Returns list of `AuditEvent` elements (containing timestamps, target URLs, HTTP methods, and status codes).
+  * Returns list of `AuditEvent` elements (containing timestamps, target URLs, HTTP methods, status codes, environment, caller role, and identity levels).
+
+---
+
+## Technical Details: Parser & Model Improvements
+
+All management sub-clients interface with the CLI daemon behind the scenes. The SDK includes robust, built-in output parsers designed to cleanly extract typed models from the Go CLI's complex UI responses:
+* **Lipgloss Border-Aware Table Parsing**: Successfully strips ANSI color codes and parses tables utilizing Lipgloss unicode rounded borders (`╭`, `─`, `╮`, `│`, `╯`, `╰`).
+* **Rich Metadata Support**: 
+  * `Workspace` elements now include `type` and `role`.
+  * `Project` elements include `description` and `workspace_id`.
+  * `Member` elements include `id` and `status` (`ACCEPTED`/`PENDING`).
+  * `AllowlistEntry` elements include `added_by` and `created_at`.
+  * `AuditEvent` elements include `id`, `environment`, `identity_level`, `resolution_path`, `caller_role`, `workspace_id`, `project_id`, and `token_id`.
+

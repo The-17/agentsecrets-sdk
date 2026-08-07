@@ -11,6 +11,7 @@ The official Python client for [AgentSecrets](https://github.com/The-17/agentsec
   * [Error Handling & Troubleshooting](docs/error_handling.md)
   * [Testing with `MockAgentSecrets`](docs/testing.md)
   * [Practical Developer Tutorials](docs/tutorials.md)
+  * [SDK Manual Testing Guide](docs/manual_testing.md)
 
 ```python
 from agentsecrets import AgentSecrets
@@ -126,7 +127,7 @@ import httpx
 
 # 1. Initialize the transparent interceptor
 # Optionally pass context settings: port, workspace, project, or environment.
-init(intercept=True, environment="development")
+init(environment="development")
 
 # 2. Use the credential helper to define a placeholder
 stripe_token = credential.STRIPE_API_KEY  # yields "AS_SECRET_STRIPE_API_KEY"

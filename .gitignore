@@ -129,5 +129,7 @@ tmp/
 temp/
 .tmp/
 
-# ----- Local Learning Notes (not for publication) -----
+# ----- Local Learning Notes & Dev Specifications (not for publication) -----
 learning/
+docs/dev/
+

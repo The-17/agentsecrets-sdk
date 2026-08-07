@@ -17,9 +17,13 @@ client = AgentSecrets(
     project="my-proj",      # Target project name (defaults to AGENTSECRETS_PROJECT)
     auto_start=True,        # If True, automatically launches the proxy daemon if it's stopped
     intercept=False,        # If True, registers transparent HTTP/HTTPS interception globally
-    environment="staging"   # Targets the specified universal project environment
+    environment="staging",  # Targets the specified universal project environment
+    agent="my-agent-id",    # Declared agent identity for logging
+    agent_token="my-token"  # Issued agent cryptographic token or keychain reference (e.g. "MY-AGENT-ID_TOKEN")
 )
 ```
+
+No credentials or secret values are passed here. When using `agent_token`, you can reference tokens stored in your system keyring by passing `"AGENTNAME_TOKEN"`. The proxy resolves the actual value from the Keychain at runtime.
 
 ---
 

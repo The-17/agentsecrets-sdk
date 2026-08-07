@@ -43,7 +43,7 @@ You can specify the initial environment context when calling the global `init()`
 from agentsecrets import init
 
 # Initializes transparent interception and configures the environment context
-init(intercept=True, environment="production")
+init(environment="production")
 ```
 
 ---

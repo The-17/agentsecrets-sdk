@@ -69,6 +69,14 @@ def _parse_audit_logs(output: str) -> list[AuditEvent]:
                 domain=data.get("domain", ""),
                 reason=data.get("reason", "-"),
                 redacted=data.get("redacted", False),
+                id=data.get("id", ""),
+                environment=data.get("environment", ""),
+                identity_level=data.get("identity_level", ""),
+                resolution_path=data.get("resolution_path", ""),
+                caller_role=data.get("caller_role", ""),
+                workspace_id=data.get("workspace_id", ""),
+                project_id=data.get("project_id", ""),
+                token_id=data.get("token_id", ""),
             ))
         except (ValueError, KeyError, _json.JSONDecodeError):
             continue

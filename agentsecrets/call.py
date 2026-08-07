@@ -26,6 +26,39 @@ from .models import AgentSecretsResponse
 # Header building — one function, no duplication
 # ---------------------------------------------------------------------------
 
+def _get_session_token() -> str | None:
+    """Read the proxy session token securely from file backend or OS Keychain."""
+    import os
+    import json
+    import base64
+    from pathlib import Path
+
+    # 1. Fallback JSON file backend (Linux/WSL)
+    home = Path.home()
+    keyring_path = home / ".agentsecrets" / "keyring.json"
+    if keyring_path.exists():
+        try:
+            with open(keyring_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                token_data = data.get("proxy_session_token", {})
+                priv_b64 = token_data.get("private")
+                if priv_b64:
+                    return base64.b64decode(priv_b64).decode("utf-8")
+        except Exception:
+            pass
+
+    # 2. Native OS Keychain (using keyring package if installed)
+    try:
+        import keyring
+        token = keyring.get_password("AgentSecrets", "proxy_session_token")
+        if token:
+            return token
+    except Exception:
+        pass
+
+    return None
+
+
 def _build_proxy_headers(
     url: str,
     *,
@@ -37,12 +70,17 @@ def _build_proxy_headers(
     body_field: dict[str, str] | None = None,
     form_field: dict[str, str] | None = None,
     agent_id: str | None = None,
+    agent_token: str | None = None,
 ) -> dict[str, str]:
     """Convert call parameters into ``X-AS-*`` proxy headers."""
     headers: dict[str, str] = {
         "X-AS-Target-URL": url,
         "X-AS-Method": method.upper(),
     }
+
+    session_token = _get_session_token()
+    if session_token:
+        headers["X-AS-Session-Token"] = session_token
 
     if bearer:
         headers["X-AS-Inject-Bearer"] = bearer
@@ -62,6 +100,8 @@ def _build_proxy_headers(
             headers[f"X-AS-Inject-Form-{key}"] = secret_key
     if agent_id:
         headers["X-AS-Agent-ID"] = agent_id
+    if agent_token:
+        headers["X-AS-Agent-Token"] = agent_token
 
     return headers
 
@@ -155,6 +195,7 @@ def call(
     body_field: dict[str, str] | None = None,
     form_field: dict[str, str] | None = None,
     agent_id: str | None = None,
+    agent_token: str | None = None,
     timeout: float = 30.0,
 ) -> AgentSecretsResponse:
     """Make an authenticated API call through the proxy (synchronous).
@@ -176,6 +217,8 @@ def call(
         not secret values.
     agent_id:
         Optional agent identifier for audit logging.
+    agent_token:
+        Optional agent token for authorization.
     timeout:
         HTTP timeout in seconds.
 
@@ -193,6 +236,7 @@ def call(
         body_field=body_field,
         form_field=form_field,
         agent_id=agent_id,
+        agent_token=agent_token,
     )
     if headers:
         proxy_headers.update(headers)
@@ -244,6 +288,7 @@ async def async_call(
     body_field: dict[str, str] | None = None,
     form_field: dict[str, str] | None = None,
     agent_id: str | None = None,
+    agent_token: str | None = None,
     timeout: float = 30.0,
 ) -> AgentSecretsResponse:
     """Make an authenticated API call through the proxy (asynchronous).
@@ -260,6 +305,7 @@ async def async_call(
         body_field=body_field,
         form_field=form_field,
         agent_id=agent_id,
+        agent_token=agent_token,
     )
     if headers:
         proxy_headers.update(headers)

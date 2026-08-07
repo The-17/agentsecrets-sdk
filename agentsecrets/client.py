@@ -63,11 +63,15 @@ class AgentSecrets:
         auto_start: bool = True,
         intercept: bool = False,
         environment: str | None = None,
+        agent: Any | None = None,
+        agent_token: str | None = None,
     ) -> None:
         self._port = port or int(os.environ.get("AGENTSECRETS_PORT", DEFAULT_PORT))
         self._workspace = workspace or os.environ.get("AGENTSECRETS_WORKSPACE")
         self._project = project or os.environ.get("AGENTSECRETS_PROJECT")
         self._auto_start = auto_start
+        self._agent = agent
+        self._agent_token = agent_token
 
         from .config import settings
         self._environment = (
@@ -124,7 +128,9 @@ class AgentSecrets:
         query: dict[str, str] | None = None,
         body_field: dict[str, str] | None = None,
         form_field: dict[str, str] | None = None,
+        agent: Any | None = None,
         agent_id: str | None = None,
+        agent_token: str | None = None,
         timeout: float = 30.0,
     ) -> AgentSecretsResponse:
         """Make an authenticated API call through the proxy.
@@ -132,6 +138,25 @@ class AgentSecrets:
         See :func:`agentsecrets.call.call` for full parameter docs.
         """
         auth = self._ensure_auth()
+
+        # Resolve agent identity
+        effective_agent = agent or agent_id or self._agent
+        effective_token = agent_token or self._agent_token
+
+        resolved_agent_id = None
+        resolved_agent_token = effective_token
+
+        if effective_agent is not None:
+            if isinstance(effective_agent, str):
+                resolved_agent_id = effective_agent
+            elif hasattr(effective_agent, "name"):
+                resolved_agent_id = effective_agent.name
+            else:
+                resolved_agent_id = str(effective_agent)
+
+            if not resolved_agent_token:
+                resolved_agent_token = f"{resolved_agent_id.upper()}_TOKEN"
+
         return _call(
             auth.port,
             url,
@@ -144,7 +169,8 @@ class AgentSecrets:
             query=query,
             body_field=body_field,
             form_field=form_field,
-            agent_id=agent_id,
+            agent_id=resolved_agent_id,
+            agent_token=resolved_agent_token,
             timeout=timeout,
         )
 
@@ -161,11 +187,32 @@ class AgentSecrets:
         query: dict[str, str] | None = None,
         body_field: dict[str, str] | None = None,
         form_field: dict[str, str] | None = None,
+        agent: Any | None = None,
         agent_id: str | None = None,
+        agent_token: str | None = None,
         timeout: float = 30.0,
     ) -> AgentSecretsResponse:
         """Async variant of :meth:`call`."""
         auth = self._ensure_auth()
+
+        # Resolve agent identity
+        effective_agent = agent or agent_id or self._agent
+        effective_token = agent_token or self._agent_token
+
+        resolved_agent_id = None
+        resolved_agent_token = effective_token
+
+        if effective_agent is not None:
+            if isinstance(effective_agent, str):
+                resolved_agent_id = effective_agent
+            elif hasattr(effective_agent, "name"):
+                resolved_agent_id = effective_agent.name
+            else:
+                resolved_agent_id = str(effective_agent)
+
+            if not resolved_agent_token:
+                resolved_agent_token = f"{resolved_agent_id.upper()}_TOKEN"
+
         return await _async_call(
             auth.port,
             url,
@@ -178,7 +225,8 @@ class AgentSecrets:
             query=query,
             body_field=body_field,
             form_field=form_field,
-            agent_id=agent_id,
+            agent_id=resolved_agent_id,
+            agent_token=resolved_agent_token,
             timeout=timeout,
         )
 

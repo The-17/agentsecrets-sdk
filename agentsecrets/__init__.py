@@ -15,6 +15,7 @@
 
 __version__ = "2.0.0"
 
+from . import agent
 from .client import AgentSecrets
 from .config import settings
 from .credential import credential
@@ -35,11 +36,14 @@ from .errors import (
 )
 from .interceptor import install_interceptor
 from .models import (
+    AgentCapabilities,
     AgentSecretsResponse,
+    AgentToken,
     AllowlistEntry,
     AllowlistEvent,
     AuditEvent,
     DiffResult,
+    IssuedAgentToken,
     Member,
     Project,
     ProxyStatus,
@@ -78,6 +82,8 @@ __all__ = [
     "settings",
     "credential",
     "init",
+    # Submodules
+    "agent",
     # Client
     "AgentSecrets",
     # Errors
@@ -95,11 +101,14 @@ __all__ = [
     "UpstreamError",
     "WorkspaceNotFound",
     # Models
+    "AgentCapabilities",
     "AgentSecretsResponse",
+    "AgentToken",
     "AllowlistEntry",
     "AllowlistEvent",
     "AuditEvent",
     "DiffResult",
+    "IssuedAgentToken",
     "Member",
     "Project",
     "ProxyStatus",

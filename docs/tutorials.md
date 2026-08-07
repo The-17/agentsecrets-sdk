@@ -87,7 +87,7 @@ from langchain_openai import ChatOpenAI
 from langchain.agents import initialize_agent, AgentType
 
 # 1. Enable interception
-init(intercept=True, environment="development")
+init(environment="development")
 
 # 2. Instantiate tools using the credential placeholder
 # TavilySearchResults uses requests internally; its call will be intercepted
@@ -151,3 +151,76 @@ for client_name in clients:
 # Once outside the loop, the workspace is automatically restored to the original global context
 ```
 This guarantees that workspace credentials never bleed into other accounts, and operations are strictly isolated.
+
+---
+
+## Tutorial 4: Securing a Custom AI Agent Reasoning Loop
+
+Many developers build custom AI agent systems (using standard APIs directly rather than heavy frameworks like LangChain). It is simple to plug in AgentSecrets to secure these environments.
+
+Below is a complete, minimal implementation of a custom AI agent that uses standard `requests` to call the Anthropic Claude or OpenAI API. It executes tool actions based on LLM decisions without exposing any keys in memory.
+
+### Step 1: Set up the Secrets
+Ensure the LLM API key and target API domains are configured in your workspace:
+```bash
+agentsecrets secrets set ANTHROPIC_API_KEY=sk-ant-xxx
+agentsecrets workspace allowlist add api.anthropic.com
+agentsecrets workspace allowlist add api.weatherapi.com
+agentsecrets proxy start
+```
+
+### Step 2: Build the Secure Agent Loop
+Create `agent.py`:
+```python
+import requests
+import json
+from agentsecrets import init, credential
+
+# 1. Initialize AgentSecrets interception
+init(environment="development")
+
+# 2. Define tools using secure placeholders
+WEATHER_API_KEY_REF = credential.WEATHER_API_KEY # returns "AS_SECRET_WEATHER_API_KEY"
+ANTHROPIC_KEY_REF = credential.ANTHROPIC_API_KEY # returns "AS_SECRET_ANTHROPIC_API_KEY"
+
+def fetch_weather(location: str) -> str:
+    # Requests is patched. The placeholder is intercepted and injected by the proxy.
+    url = f"https://api.weatherapi.com/v1/current.json?q={location}"
+    response = requests.get(
+        url,
+        headers={"key": WEATHER_API_KEY_REF} # Injected securely at the proxy
+    )
+    if response.status_code == 200:
+        return response.json().get("current", {}).get("condition", {}).get("text", "Unknown")
+    return "Failed to fetch weather."
+
+def run_agent_turn(user_query: str) -> str:
+    # Outbound call to Claude is intercepted; the real key is injected on-the-fly.
+    headers = {
+        "x-api-key": ANTHROPIC_KEY_REF,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+    }
+    
+    payload = {
+        "model": "claude-3-5-sonnet-latest",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": f"User query: '{user_query}'. Should we fetch weather? Answer YES or NO."}]
+    }
+    
+    res = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers=headers,
+        json=payload
+    )
+    
+    decision = res.json()["content"][0]["text"].strip()
+    if "YES" in decision:
+        return f"Agent Action: Weather is {fetch_weather('London')}."
+    return "Agent Action: Did not fetch weather."
+
+if __name__ == "__main__":
+    # The application runs with zero raw API keys in memory!
+    print(run_agent_turn("What is the weather in London right now?"))
+```
+

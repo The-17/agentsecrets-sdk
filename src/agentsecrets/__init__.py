@@ -16,7 +16,7 @@
 __version__ = "2.0.0"
 
 from . import agent
-from .client import AgentSecrets
+from .client import AgentSecrets, AsyncAgentSecrets
 from .config import settings
 from .credential import credential
 from .errors import (
@@ -86,6 +86,7 @@ __all__ = [
     "agent",
     # Client
     "AgentSecrets",
+    "AsyncAgentSecrets",
     # Errors
     "AgentSecretsError",
     "AgentSecretsNotRunning",

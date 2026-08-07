@@ -39,8 +39,49 @@ from .spawn import spawn as _spawn
 from .spawn import spawn_async as _spawn_async
 
 
-class AgentSecrets:
-    """AgentSecrets SDK client.
+def _resolve_agent_identity(
+    agent: Any | None,
+    agent_id: str | None,
+    agent_token: str | None,
+    default_agent: Any | None,
+    default_token: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve an effective ``(agent_id, agent_token)`` pair.
+
+    Precedence for the agent: explicit ``agent`` > ``agent_id`` > the
+    constructor default. A string agent is used verbatim; an object with a
+    ``.name`` contributes its name; anything else is stringified. When no
+    token is supplied, one is synthesised as ``f"{ID.upper()}_TOKEN"``. An
+    explicitly supplied token is never overwritten.
+    """
+    effective_agent = agent or agent_id or default_agent
+    effective_token = agent_token or default_token
+
+    resolved_agent_id = None
+    resolved_agent_token = effective_token
+
+    if effective_agent is not None:
+        if isinstance(effective_agent, str):
+            resolved_agent_id = effective_agent
+        elif hasattr(effective_agent, "name"):
+            resolved_agent_id = effective_agent.name
+        else:
+            resolved_agent_id = str(effective_agent)
+
+        if not resolved_agent_token:
+            resolved_agent_token = f"{resolved_agent_id.upper()}_TOKEN"
+
+    return resolved_agent_id, resolved_agent_token
+
+
+class _BaseClient:
+    """Shared configuration, auth resolution, and lifecycle state.
+
+    Both :class:`AgentSecrets` (sync) and :class:`AsyncAgentSecrets` (async)
+    extend this. It owns the constructor, the management sub-clients, lazy
+    auth resolution, the closed-state guard, and the synchronous defaults for
+    :meth:`call` / :meth:`spawn`. :class:`AsyncAgentSecrets` overrides those two
+    with coroutine equivalents; everything else is shared unchanged.
 
     Parameters
     ----------
@@ -72,6 +113,7 @@ class AgentSecrets:
         self._auto_start = auto_start
         self._agent = agent
         self._agent_token = agent_token
+        self._is_closed = False
 
         from .config import settings
         self._environment = (
@@ -105,6 +147,14 @@ class AgentSecrets:
     # Auth
     # ------------------------------------------------------------------
 
+    def _ensure_open(self) -> None:
+        """Verify the client has not been closed."""
+        if self._is_closed:
+            raise RuntimeError(
+                "Cannot use AgentSecrets client after close(). "
+                "Create a new client or use a context manager."
+            )
+
     def _ensure_auth(self) -> AuthContext:
         """Resolve authentication lazily on first use."""
         if self._auth is None:
@@ -137,25 +187,12 @@ class AgentSecrets:
 
         See :func:`agentsecrets.call.call` for full parameter docs.
         """
+        self._ensure_open()
         auth = self._ensure_auth()
 
-        # Resolve agent identity
-        effective_agent = agent or agent_id or self._agent
-        effective_token = agent_token or self._agent_token
-
-        resolved_agent_id = None
-        resolved_agent_token = effective_token
-
-        if effective_agent is not None:
-            if isinstance(effective_agent, str):
-                resolved_agent_id = effective_agent
-            elif hasattr(effective_agent, "name"):
-                resolved_agent_id = effective_agent.name
-            else:
-                resolved_agent_id = str(effective_agent)
-
-            if not resolved_agent_token:
-                resolved_agent_token = f"{resolved_agent_id.upper()}_TOKEN"
+        resolved_agent_id, resolved_agent_token = _resolve_agent_identity(
+            agent, agent_id, agent_token, self._agent, self._agent_token
+        )
 
         return _call(
             auth.port,
@@ -193,25 +230,12 @@ class AgentSecrets:
         timeout: float = 30.0,
     ) -> AgentSecretsResponse:
         """Async variant of :meth:`call`."""
+        self._ensure_open()
         auth = self._ensure_auth()
 
-        # Resolve agent identity
-        effective_agent = agent or agent_id or self._agent
-        effective_token = agent_token or self._agent_token
-
-        resolved_agent_id = None
-        resolved_agent_token = effective_token
-
-        if effective_agent is not None:
-            if isinstance(effective_agent, str):
-                resolved_agent_id = effective_agent
-            elif hasattr(effective_agent, "name"):
-                resolved_agent_id = effective_agent.name
-            else:
-                resolved_agent_id = str(effective_agent)
-
-            if not resolved_agent_token:
-                resolved_agent_token = f"{resolved_agent_id.upper()}_TOKEN"
+        resolved_agent_id, resolved_agent_token = _resolve_agent_identity(
+            agent, agent_id, agent_token, self._agent, self._agent_token
+        )
 
         return await _async_call(
             auth.port,
@@ -245,6 +269,7 @@ class AgentSecrets:
 
         See :func:`agentsecrets.spawn.spawn` for full parameter docs.
         """
+        self._ensure_open()
         return _spawn(command, capture=capture, timeout=timeout)
 
     async def spawn_async(
@@ -255,6 +280,7 @@ class AgentSecrets:
         timeout: float | None = None,
     ) -> SpawnResult:
         """Async variant of :meth:`spawn`."""
+        self._ensure_open()
         return await _spawn_async(command, capture=capture, timeout=timeout)
 
     # ------------------------------------------------------------------
@@ -267,6 +293,7 @@ class AgentSecrets:
         This is a convenience wrapper; for structured data, use the
         management sub-clients directly.
         """
+        self._ensure_open()
         from ._cli import run as _cli_run
         result = _cli_run("status")
         return {"raw": result.stdout}
@@ -312,12 +339,113 @@ class AgentSecrets:
     # ------------------------------------------------------------------
 
     def __enter__(self) -> AgentSecrets:
+        self._ensure_open()
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
 
     def close(self) -> None:
-        """Release any held resources."""
-        # Currently a no-op; here for forward compatibility.
-        self._auth = None
+        """Close the client and release all held resources.
+
+        After calling close(), the client cannot be reused. Attempting to call
+        any method on a closed client will raise RuntimeError.
+        """
+        if not self._is_closed:
+            self._is_closed = True
+            self._auth = None
+
+
+class AgentSecrets(_BaseClient):
+    """Synchronous AgentSecrets client — the default entry point.
+
+    All I/O is synchronous: :meth:`call` and :meth:`spawn` block until they
+    return. Async variants (:meth:`async_call`, :meth:`spawn_async`) are
+    available for occasional use inside an event loop, but if async is your
+    primary mode reach for :class:`AsyncAgentSecrets` instead.
+
+    Use as a context manager to guarantee cleanup::
+
+        with AgentSecrets() as client:
+            client.call("https://api.stripe.com/v1/balance", bearer="STRIPE_KEY")
+    """
+
+
+class AsyncAgentSecrets(_BaseClient):
+    """Asynchronous AgentSecrets client.
+
+    Mirrors :class:`AgentSecrets`, but :meth:`call` and :meth:`spawn` are
+    coroutines — so the primary API is ``await client.call(...)`` (not
+    ``async_call``). Use ``async with`` for deterministic cleanup::
+
+        async with AsyncAgentSecrets() as client:
+            await client.call(
+                "https://api.stripe.com/v1/balance", bearer="STRIPE_KEY"
+            )
+    """
+
+    async def call(  # type: ignore[override]
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        body: Any = None,
+        headers: dict[str, str] | None = None,
+        bearer: str | None = None,
+        basic: str | None = None,
+        header: dict[str, str] | None = None,
+        query: dict[str, str] | None = None,
+        body_field: dict[str, str] | None = None,
+        form_field: dict[str, str] | None = None,
+        agent: Any | None = None,
+        agent_id: str | None = None,
+        agent_token: str | None = None,
+        timeout: float = 30.0,
+    ) -> AgentSecretsResponse:
+        """Make an authenticated API call through the proxy (async).
+
+        Delegates to :meth:`async_call`; see it for full parameter docs.
+        """
+        return await self.async_call(
+            url,
+            method=method,
+            body=body,
+            headers=headers,
+            bearer=bearer,
+            basic=basic,
+            header=header,
+            query=query,
+            body_field=body_field,
+            form_field=form_field,
+            agent=agent,
+            agent_id=agent_id,
+            agent_token=agent_token,
+            timeout=timeout,
+        )
+
+    async def spawn(  # type: ignore[override]
+        self,
+        command: list[str],
+        *,
+        capture: bool = True,
+        timeout: float | None = None,
+    ) -> SpawnResult:
+        """Spawn a child process with secrets injected as env vars (async).
+
+        Delegates to :meth:`spawn_async`.
+        """
+        return await self.spawn_async(command, capture=capture, timeout=timeout)
+
+    async def __aenter__(self) -> AsyncAgentSecrets:
+        self._ensure_open()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the client and release resources (async variant of :meth:`close`).
+
+        Idempotent: closing an already-closed client is a no-op.
+        """
+        self.close()

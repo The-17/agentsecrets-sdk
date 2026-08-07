@@ -285,14 +285,50 @@ Note: `response` has no field containing the injected credential value. This is 
 
 ## Async
 
+For async-first code, use `AsyncAgentSecrets`. Its `call()` and `spawn()` are
+coroutines, so the primary API is `await client.call(...)`:
+
 ```python
-response = await client.async_call(
+from agentsecrets import AsyncAgentSecrets
+
+async with AsyncAgentSecrets() as client:
+    response = await client.call(
+        "https://api.openai.com/v1/models",
+        bearer="OPENAI_KEY",
+    )
+```
+
+Every `call()` parameter is supported. If you are mostly synchronous and only
+need the occasional coroutine, the sync `AgentSecrets` client also exposes
+`async_call()` and `spawn_async()`:
+
+```python
+response = await AgentSecrets().async_call(
     "https://api.openai.com/v1/models",
-    bearer="OPENAI_KEY"
+    bearer="OPENAI_KEY",
 )
 ```
 
-Every `call()` parameter is supported in `async_call()`.
+---
+
+## Resource Management
+
+Both clients are context managers. Exiting the block closes the client and
+releases the resolved auth context; a closed client cannot be reused (any
+further call raises `RuntimeError`).
+
+```python
+# Synchronous
+with AgentSecrets() as client:
+    client.call("https://api.stripe.com/v1/balance", bearer="STRIPE_KEY")
+
+# Asynchronous
+async with AsyncAgentSecrets() as client:
+    await client.call("https://api.stripe.com/v1/balance", bearer="STRIPE_KEY")
+```
+
+You can also close explicitly with `client.close()` (sync) or
+`await client.aclose()` (async). Both are idempotent.
 
 ---
 

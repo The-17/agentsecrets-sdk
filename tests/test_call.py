@@ -20,10 +20,17 @@ import json
 import warnings
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agentsecrets.call import (
     _binary_supports_json_call,
     _build_call_args,
+    _dispatch_json_result,
+    _envelope_body_str,
+    _flatten_headers,
     _map_call_error,
+    _map_call_json_error,
+    _parse_call_json_envelope,
     _parse_call_stdout,
 )
 from agentsecrets.errors import CLIError, DomainNotAllowed, SecretNotFound, UpstreamError
@@ -238,3 +245,144 @@ class TestBinarySupportsJsonCall:
     def test_false_when_probe_raises(self) -> None:
         with patch("agentsecrets.call.find_binary", side_effect=OSError("boom")):
             assert _binary_supports_json_call() is False
+
+
+class TestFlattenHeaders:
+    """Verify ``_flatten_headers`` behavior."""
+
+    def test_joins_list_values(self) -> None:
+        result = _flatten_headers(
+            {"Content-Type": ["application/json", "text/plain"]},
+        )
+        assert result == {"Content-Type": "application/json, text/plain"}
+
+    def test_passes_through_string_values(self) -> None:
+        result = _flatten_headers({"Content-Type": "application/json"})
+        assert result == {"Content-Type": "application/json"}
+
+    def test_returns_empty_dict_for_non_dict_input(self) -> None:
+        assert _flatten_headers(None) == {}
+        assert _flatten_headers([]) == {}
+
+
+class TestEnvelopeBodyStr:
+    """Verify ``_envelope_body_str`` behavior."""
+
+    def test_returns_string_body_as_is(self) -> None:
+        assert _envelope_body_str({"body": "some string"}) == "some string"
+
+    def test_returns_empty_string_for_none_body(self) -> None:
+        assert _envelope_body_str({"body": None}) == ""
+        assert _envelope_body_str({}) == ""
+
+    def test_returns_stringified_body_for_other_types(self) -> None:
+        assert _envelope_body_str({"body": {"key": "value"}}) == "{'key': 'value'}"
+        assert _envelope_body_str({"body": 42}) == "42"
+
+
+class TestParseCallJsonEnvelope:
+    """Verify ``_parse_call_json_envelope`` behavior."""
+
+    def test_parses_successful_envelope(self) -> None:
+        envelope = {
+            "status": 200,
+            "headers": {"Content-Type": ["application/json"]},
+            "body": '{"ok": true}',
+            "redacted": False,
+            "duration_ms": 42
+        }
+        resp = _parse_call_json_envelope(envelope, 100)
+        assert resp.status_code == 200
+        assert resp.headers == {"Content-Type": "application/json"}
+        assert resp.json() == {"ok": True}
+        assert resp.redacted is False
+        assert resp.duration_ms == 42
+
+    def test_non_numeric_status_defaults_to_zero(self) -> None:
+        envelope = {"status": "not-a-number", "body": "text"}
+        resp = _parse_call_json_envelope(envelope, 100)
+        assert resp.status_code == 0
+
+    def test_missing_duration_ms_uses_fallback(self) -> None:
+        envelope = {"status": 200, "body": "text"}
+        resp = _parse_call_json_envelope(envelope, 100)
+        assert resp.duration_ms == 100
+
+    def test_redacted_flag_from_envelope(self) -> None:
+        envelope = {"status": 200, "body": "text", "redacted": True}
+        resp = _parse_call_json_envelope(envelope, 100)
+        assert resp.redacted is True
+
+
+class TestMapCallJsonError:
+    """Verify ``_map_call_json_error`` behavior."""
+
+    def test_domain_not_allowed(self) -> None:
+        envelope = {
+            "error": "proxy blocked",
+            "body": json.dumps({"error": "domain_not_in_allowlist", "domain": "api.stripe.com"}),
+        }
+        exc = _map_call_json_error(envelope, "https://api.stripe.com")
+        assert isinstance(exc, DomainNotAllowed)
+        assert exc.domain == "api.stripe.com"
+
+    def test_empty_allowlist(self) -> None:
+        envelope = {
+            "error": "proxy blocked",
+            "body": json.dumps({"error": "empty_allowlist"}),
+        }
+        exc = _map_call_json_error(envelope, "https://api.stripe.com")
+        assert isinstance(exc, DomainNotAllowed)
+        # No domain field in body → falls back to the URL.
+        assert exc.domain == "https://api.stripe.com"
+
+    def test_secret_not_found(self) -> None:
+        envelope = {"error": "secret 'KEY' not found in keychain"}
+        exc = _map_call_json_error(envelope, "https://api.stripe.com")
+        assert isinstance(exc, SecretNotFound)
+        assert exc.key == "KEY"
+
+    def test_upstream_error(self) -> None:
+        envelope = {"status": 404, "body": "Not found"}
+        exc = _map_call_json_error(envelope, "https://api.stripe.com")
+        assert isinstance(exc, UpstreamError)
+        assert exc.status_code == 404
+
+    def test_cli_error(self) -> None:
+        envelope = {"status": 0, "error": "unknown"}
+        exc = _map_call_json_error(envelope, "https://api.stripe.com")
+        assert isinstance(exc, CLIError)
+
+
+class TestDispatchJsonResult:
+    """Verify ``_dispatch_json_result`` behavior."""
+
+    def test_success_returns_response(self) -> None:
+        stdout = '{"status": 200, "body": "ok", "duration_ms": 10}'
+        resp = _dispatch_json_result(stdout, "", 0, "https://example.com", 10)
+        assert resp.status_code == 200
+        assert resp.text == "ok"
+        assert resp.duration_ms == 10
+
+    def test_error_envelope_raises_exception(self) -> None:
+        body = json.dumps({"error": "domain_not_in_allowlist", "domain": "example.com"})
+        stdout = json.dumps({"error": "proxy blocked", "body": body})
+        with pytest.raises(DomainNotAllowed) as exc_info:
+            _dispatch_json_result(stdout, "", 0, "https://example.com", 10)
+        assert exc_info.value.domain == "example.com"
+
+    def test_non_json_stdout_with_non_zero_returncode(self) -> None:
+        stdout = "not json"
+        stderr = "domain_not_in_allowlist: 'example.com'"
+        with pytest.raises(DomainNotAllowed) as exc_info:
+            _dispatch_json_result(stdout, stderr, 1, "https://example.com", 10)
+        assert exc_info.value.domain == "example.com"
+
+    def test_non_json_stdout_with_zero_returncode(self) -> None:
+        stdout = "not json"
+        with pytest.raises(CLIError, match="not json"):
+            _dispatch_json_result(stdout, "", 0, "https://example.com", 10)
+
+    def test_empty_stdout_with_zero_returncode(self) -> None:
+        with pytest.raises(CLIError, match="empty JSON output"):
+            _dispatch_json_result("", "", 0, "https://example.com", 10)

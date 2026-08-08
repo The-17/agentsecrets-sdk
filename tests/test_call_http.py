@@ -26,12 +26,30 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agentsecrets.call import async_call, call
+from agentsecrets.call import _binary_supports_json_call, async_call, call
 from agentsecrets.errors import CLIError, DomainNotAllowed, SecretNotFound, UpstreamError
 from agentsecrets.models import AgentSecretsResponse
 
 BINARY = "/usr/local/bin/agentsecrets"
 TARGET = "https://api.stripe.com/v1/balance"
+
+
+@pytest.fixture(autouse=True)
+def _force_text_mode():
+    """Default every test to the text path by pinning the JSON-capability probe.
+
+    ``call()``/``async_call()`` invoke :func:`_binary_supports_json_call`, an
+    ``lru_cache``d probe that shells out to ``call --help``.  Left unpinned it
+    would run against each test's mocked ``subprocess.run`` and memoise the
+    first result process-wide, coupling tests to each other and to run order.
+    Pinning it to ``False`` keeps the existing text-mode tests deterministic;
+    the JSON-mode tests override this with their own ``True`` patch.
+    """
+    _binary_supports_json_call.cache_clear()
+    with patch("agentsecrets.call._binary_supports_json_call", return_value=False):
+        yield
+    _binary_supports_json_call.cache_clear()
+
 
 
 # ---------------------------------------------------------------------------
@@ -250,3 +268,167 @@ class TestAsyncCallDelegation:
             with pytest.raises(DomainNotAllowed) as excinfo:
                 await async_call(TARGET, bearer="OPENAI_KEY")
         assert excinfo.value.domain == "api.openai.com"
+
+
+_JSON_MODE = patch(
+    "agentsecrets.call._binary_supports_json_call", return_value=True,
+)
+
+
+class TestCallJsonMode:
+    """Synchronous ``call()`` JSON-mode behaviour."""
+
+    def test_json_success_round_trip(self) -> None:
+        envelope = json.dumps({
+            "status": 200,
+            "headers": {"Content-Type": ["application/json"]},
+            "body": '{"ok": true}',
+            "redacted": False,
+            "duration_ms": 42,
+        })
+        find_p, run_p = _patch_sync(_run_result(stdout=envelope))
+        with find_p, run_p, _JSON_MODE:
+            resp = call(TARGET, bearer="K")
+
+        assert resp.status_code == 200
+        assert resp.headers == {"Content-Type": "application/json"}
+        assert resp.body == b'{"ok": true}'
+        assert resp.text == '{"ok": true}'
+        assert resp.json() == {"ok": True}
+        assert resp.redacted is False
+        assert resp.duration_ms == 42
+
+    def test_json_output_flag_in_argv(self) -> None:
+        envelope = json.dumps({
+            "status": 200, "headers": {},
+            "body": "", "redacted": False, "duration_ms": 10,
+        })
+        find_p, run_p = _patch_sync(_run_result(stdout=envelope))
+        with find_p, run_p as mock_run, _JSON_MODE:
+            call(TARGET, bearer="K")
+
+        argv = _argv_of(mock_run)
+        assert "--output" in argv
+        assert argv[argv.index("--output") + 1] == "json"
+
+    def test_json_redacted_flag(self) -> None:
+        envelope = json.dumps({
+            "status": 200, "headers": {},
+            "body": "", "redacted": True, "duration_ms": 10,
+        })
+        find_p, run_p = _patch_sync(_run_result(stdout=envelope))
+        with find_p, run_p, _JSON_MODE:
+            resp = call(TARGET, bearer="K")
+
+        assert resp.redacted is True
+
+    def test_json_domain_block(self) -> None:
+        envelope = json.dumps({
+            "status": 0,
+            "headers": {},
+            "body": '{"error": "domain_not_in_allowlist",'
+                    ' "domain": "api.stripe.com"}',
+            "redacted": False,
+            "duration_ms": 0,
+            "error": "proxy blocked",
+        })
+        find_p, run_p = _patch_sync(
+            _run_result(returncode=1, stdout=envelope),
+        )
+        with find_p, run_p, _JSON_MODE:
+            with pytest.raises(DomainNotAllowed) as excinfo:
+                call(TARGET, bearer="K")
+        assert excinfo.value.domain == "api.stripe.com"
+
+    def test_json_secret_not_found(self) -> None:
+        envelope = json.dumps({
+            "status": 0,
+            "headers": {},
+            "body": "",
+            "redacted": False,
+            "duration_ms": 0,
+            "error": "secret 'STRIPE_KEY' not found in keychain",
+        })
+        find_p, run_p = _patch_sync(
+            _run_result(returncode=1, stdout=envelope),
+        )
+        with find_p, run_p, _JSON_MODE:
+            with pytest.raises(SecretNotFound) as excinfo:
+                call(TARGET, bearer="STRIPE_KEY")
+        assert excinfo.value.key == "STRIPE_KEY"
+
+    def test_json_upstream_error(self) -> None:
+        envelope = json.dumps({
+            "status": 502,
+            "headers": {},
+            "body": "Bad Gateway",
+            "redacted": False,
+            "duration_ms": 0,
+            "error": "upstream",
+        })
+        find_p, run_p = _patch_sync(
+            _run_result(returncode=1, stdout=envelope),
+        )
+        with find_p, run_p, _JSON_MODE:
+            with pytest.raises(UpstreamError) as excinfo:
+                call(TARGET, bearer="K")
+        assert excinfo.value.status_code == 502
+
+    def test_json_unparseable_stdout_falls_back_to_stderr(self) -> None:
+        find_p, run_p = _patch_sync(_run_result(
+            returncode=1,
+            stdout="not json",
+            stderr="upstream connection refused",
+        ))
+        with find_p, run_p, _JSON_MODE:
+            with pytest.raises(UpstreamError) as excinfo:
+                call(TARGET, bearer="K")
+        assert excinfo.value.status_code == 502
+
+
+class TestAsyncCallJsonMode:
+    """``async_call()`` JSON-mode behaviour."""
+
+    async def test_async_json_round_trip(self) -> None:
+        envelope = json.dumps({
+            "status": 200,
+            "headers": {"Content-Type": ["application/json"]},
+            "body": '{"ok": true}',
+            "redacted": False,
+            "duration_ms": 42,
+        })
+        proc = _fake_proc(stdout=envelope.encode("utf-8"))
+        find_p, exec_p = _patch_async(proc)
+        with find_p, exec_p as mock_exec, _JSON_MODE:
+            resp = await async_call(TARGET, bearer="K")
+
+        exec_args = mock_exec.call_args.args
+        assert "--output" in exec_args
+        assert exec_args[exec_args.index("--output") + 1] == "json"
+
+        assert resp.status_code == 200
+        assert resp.headers == {"Content-Type": "application/json"}
+        assert resp.body == b'{"ok": true}'
+        assert resp.json() == {"ok": True}
+        assert resp.redacted is False
+        assert resp.duration_ms == 42
+
+    async def test_async_json_domain_block(self) -> None:
+        envelope = json.dumps({
+            "status": 0,
+            "headers": {},
+            "body": '{"error": "domain_not_in_allowlist",'
+                    ' "domain": "api.stripe.com"}',
+            "redacted": False,
+            "duration_ms": 0,
+            "error": "proxy blocked",
+        })
+        proc = _fake_proc(
+            returncode=1, stdout=envelope.encode("utf-8"),
+        )
+        find_p, exec_p = _patch_async(proc)
+        with find_p, exec_p, _JSON_MODE:
+            with pytest.raises(DomainNotAllowed) as excinfo:
+                await async_call(TARGET, bearer="K")
+        assert excinfo.value.domain == "api.stripe.com"
+

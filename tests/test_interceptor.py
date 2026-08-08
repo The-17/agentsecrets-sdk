@@ -7,7 +7,8 @@ rewrite the target URL to the local proxy, and attach ``X-AS-*`` injection heade
 These tests lock down that monkeypatch contract so the interception machinery
 is not broken during refactor:
 
-* ``parse_placeholder`` recognizes ``AS_SECRET_<key>`` (header) and ``BEARER AS_SECRET_<key>`` (bearer)
+* ``parse_placeholder`` recognizes ``AS_SECRET_<key>`` (header) and
+  ``BEARER AS_SECRET_<key>`` (bearer)
 * ``install_interceptor`` globally patches send methods (no restore)
 * placeholder headers are deleted and converted to ``X-AS-Inject-*`` headers
 * the URL is rewritten to ``http://localhost:{settings.port}/proxy``
@@ -19,6 +20,8 @@ pollute the global suite.
 """
 
 from __future__ import annotations
+
+from unittest.mock import patch
 
 import pytest
 
@@ -172,34 +175,49 @@ class TestInstallInterceptorRequests:
         """Reinstall the interceptor for each test (requests path)."""
         install_interceptor()
 
-    def test_requests_placeholder_rewritten_to_proxy(self, httpx_mock) -> None:
+    def test_requests_placeholder_rewritten_to_proxy(self) -> None:
         requests = pytest.importorskip("requests")
         from agentsecrets.config import settings
 
         proxy_url = f"http://localhost:{settings.port}/proxy"
-        httpx_mock.add_response(url=proxy_url, method="GET", json={"ok": True})
 
-        with requests.Session() as session:
-            resp = session.get(
-                "https://api.stripe.com/v1/balance",
-                headers={"Authorization": "Bearer AS_SECRET_STRIPE_KEY"},
-            )
+        # `requests` sends over urllib3, not httpx, so it must be mocked at the
+        # requests transport layer (HTTPAdapter.send) where the interceptor's
+        # rewritten request actually lands — not via httpx_mock.
+        with patch("requests.adapters.HTTPAdapter.send") as mock_send:
+            mock_send.return_value = requests.Response()
 
-        req = httpx_mock.get_request()
-        assert str(req.url) == proxy_url
+            with requests.Session() as session:
+                session.get(
+                    "https://api.stripe.com/v1/balance",
+                    headers={"Authorization": "Bearer AS_SECRET_STRIPE_KEY"},
+                )
+
+            assert mock_send.call_count == 1
+            args, kwargs = mock_send.call_args
+            req = args[0] if args else kwargs.get("request")
+
+        assert req.url == proxy_url
         assert req.headers["X-AS-Target-URL"] == "https://api.stripe.com/v1/balance"
         assert req.headers["X-AS-Inject-Bearer"] == "STRIPE_KEY"
-        assert resp.json() == {"ok": True}
+        # Original placeholder header stripped.
+        assert "Authorization" not in req.headers
 
-    def test_requests_non_placeholder_passes_through(self, httpx_mock) -> None:
+    def test_requests_non_placeholder_passes_through(self) -> None:
         requests = pytest.importorskip("requests")
+
         target = "https://httpbin.org/status/200"
-        httpx_mock.add_response(url=target, method="GET", status_code=200)
 
-        with requests.Session() as session:
-            resp = session.get(target)
+        with patch("requests.adapters.HTTPAdapter.send") as mock_send:
+            mock_send.return_value = requests.Response()
 
-        req = httpx_mock.get_request()
-        assert str(req.url) == target
+            with requests.Session() as session:
+                session.get(target)
+
+            assert mock_send.call_count == 1
+            args, kwargs = mock_send.call_args
+            req = args[0] if args else kwargs.get("request")
+
+        # No placeholder -> URL untouched, no X-AS-* headers attached.
+        assert req.url == target
         assert "X-AS-Target-URL" not in req.headers
-        assert resp.status_code == 200

@@ -1,19 +1,15 @@
-"""Call translation — the core of the SDK.
+"""Call translation — supports both local binary delegation and cloud API modes.
 
-The SDK does **not** talk to the proxy over HTTP.  The local proxy is
-guarded by a pre-shared session token that the ``agentsecrets`` binary
-generates and stores in the OS keychain; that token is the *binary's* own
-loopback credential, and the keychain daemon only releases it to the real
-binary (it verifies the caller's binary hash).  A separate Python process
-cannot — and should not — read it.
-
-So ``call()`` delegates to ``agentsecrets call`` exactly the way
+In local mode (default), ``call()`` delegates to ``agentsecrets call`` exactly the way
 :mod:`agentsecrets.spawn` delegates to ``agentsecrets env``.  The binary is
 the one authorized process: it owns the session token, reuses a running
 proxy or spins up a transient one for the request (``CallViaProxy`` in
 ``pkg/proxy/client.go``), handles approval prompts, and injects the real
 secret values.  The SDK only ever passes secret **key names** as CLI flags
 and parses the result — it never sees a credential value.
+
+In cloud mode, the SDK communicates directly with the AgentSecrets cloud API
+to perform authenticated calls, eliminating the need for a local binary.
 
 Forward-compatibility: today ``agentsecrets call`` prints ``HTTP <code>`` and
 the body as plain text (no response headers).  When the binary grows a
@@ -32,6 +28,8 @@ import warnings
 from functools import lru_cache
 from typing import Any
 
+import httpx
+
 from .errors import (
     CLIError,
     DomainNotAllowed,
@@ -40,6 +38,7 @@ from .errors import (
 )
 from .models import AgentSecretsResponse
 from .proxy import find_binary
+from .config import settings
 
 # ---------------------------------------------------------------------------
 # Argv construction — SDK params -> `agentsecrets call` flags
@@ -400,7 +399,10 @@ def call(
     agent_token: str | None = None,
     timeout: float = 30.0,
 ) -> AgentSecretsResponse:
-    """Make an authenticated API call by delegating to ``agentsecrets call``.
+    """Make an authenticated API call.
+
+    In local mode (default), delegates to ``agentsecrets call`` binary.
+    In cloud mode, communicates directly with the AgentSecrets cloud API.
 
     Parameters
     ----------
@@ -423,7 +425,7 @@ def call(
     agent_token:
         Agent token, passed as ``--token``.
     timeout:
-        Maximum seconds to wait for the binary.
+        Maximum seconds to wait for the binary (local mode) or API request (cloud mode).
 
     Returns
     -------
@@ -431,12 +433,76 @@ def call(
 
     Notes
     -----
-    The proxy port and session token are handled entirely inside the binary,
+    In local mode, the proxy port and session token are handled entirely inside the binary,
     which reuses a running proxy or starts a transient one for this call.
+    In cloud mode, authentication is handled via the AgentSecrets cloud API.
     """
-    binary = find_binary()
-    use_json = _binary_supports_json_call()
-    args = _build_call_args(
+    # Check if we're in cloud mode
+    if getattr(settings, 'mode', 'local') == 'cloud':
+        return _call_via_cloud_api(
+            url,
+            method=method,
+            body=body,
+            headers=headers,
+            bearer=bearer,
+            basic=basic,
+            header=header,
+            query=query,
+            body_field=body_field,
+            form_field=form_field,
+            agent_id=agent_id,
+            agent_token=agent_token,
+            timeout=timeout,
+        )
+
+    # Local mode: delegate to binary (existing behavior)
+    if getattr(settings, 'mode', 'local') != 'cloud':
+        binary = find_binary()
+        use_json = _binary_supports_json_call()
+        args = _build_call_args(
+            url,
+            method=method,
+            body=body,
+            headers=headers,
+            bearer=bearer,
+            basic=basic,
+            header=header,
+            query=query,
+            body_field=body_field,
+            form_field=form_field,
+            agent_id=agent_id,
+            agent_token=agent_token,
+            output_json=use_json,
+        )
+
+        start = time.monotonic()
+        try:
+            result = subprocess.run(
+                [binary, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )  # noqa: S603
+        except subprocess.TimeoutExpired:
+            raise CLIError("call", -1, "Command timed out")
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        if use_json:
+            return _dispatch_json_result(
+                result.stdout or "",
+                result.stderr or "",
+                result.returncode,
+                url,
+                duration_ms,
+            )
+
+        if result.returncode != 0:
+            raise _map_call_error(result.stderr or "", result.returncode, url)
+
+        return _parse_call_stdout(result.stdout or "", duration_ms)
+
+    # Cloud mode: delegate to cloud API
+    return _call_via_cloud_api(
         url,
         method=method,
         body=body,
@@ -449,34 +515,8 @@ def call(
         form_field=form_field,
         agent_id=agent_id,
         agent_token=agent_token,
-        output_json=use_json,
+        timeout=timeout,
     )
-
-    start = time.monotonic()
-    try:
-        result = subprocess.run(
-            [binary, *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )  # noqa: S603
-    except subprocess.TimeoutExpired:
-        raise CLIError("call", -1, "Command timed out")
-    duration_ms = int((time.monotonic() - start) * 1000)
-
-    if use_json:
-        return _dispatch_json_result(
-            result.stdout or "",
-            result.stderr or "",
-            result.returncode,
-            url,
-            duration_ms,
-        )
-
-    if result.returncode != 0:
-        raise _map_call_error(result.stderr or "", result.returncode, url)
-
-    return _parse_call_stdout(result.stdout or "", duration_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +541,25 @@ async def async_call(
     timeout: float = 30.0,
 ) -> AgentSecretsResponse:
     """Async variant of :func:`call` (same parameters and semantics)."""
+    # Check if we're in cloud mode
+    if getattr(settings, 'mode', 'local') == 'cloud':
+        return await _async_call_via_cloud_api(
+            url,
+            method=method,
+            body=body,
+            headers=headers,
+            bearer=bearer,
+            basic=basic,
+            header=header,
+            query=query,
+            body_field=body_field,
+            form_field=form_field,
+            agent_id=agent_id,
+            agent_token=agent_token,
+            timeout=timeout,
+        )
+
+    # Local mode: delegate to binary (existing behavior)
     binary = find_binary()
     use_json = _binary_supports_json_call()
     args = _build_call_args(
@@ -549,3 +608,193 @@ async def async_call(
         raise _map_call_error(stderr, proc.returncode or 1, url)
 
     return _parse_call_stdout(stdout, duration_ms)
+
+
+def _call_via_cloud_api(
+    url: str,
+    *,
+    method: str = "GET",
+    body: Any = None,
+    headers: dict[str, str] | None = None,
+    bearer: str | None = None,
+    basic: str | None = None,
+    header: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+    body_field: dict[str, str] | None = None,
+    form_field: dict[str, str] | None = None,
+    agent_id: str | None = None,
+    agent_token: str | None = None,
+    timeout: float = 30.0,
+) -> AgentSecretsResponse:
+    """Make an authenticated API call via the cloud API.
+
+    Communicates directly with the AgentSecrets cloud API to perform
+    authenticated calls, eliminating the need for a local binary.
+    """
+    import os
+
+    # Determine cloud API base URL
+    base_url = os.environ.get("AGENTSECRETS_API_URL", "https://secrets-api-orpin.vercel.app/api")
+
+    # Prepare request payload
+    payload: dict[str, Any] = {}
+    if body is not None:
+        if isinstance(body, bytes):
+            payload["body"] = body.decode("utf-8", errors="replace")
+        elif isinstance(body, str):
+            payload["body"] = body
+        else:
+            payload["body"] = json.dumps(body)
+
+    if headers:
+        payload["headers"] = headers
+    if bearer:
+        payload["bearer"] = bearer
+    if basic:
+        payload["basic"] = basic
+    if header:
+        payload["header"] = header
+    if query:
+        payload["query"] = query
+    if body_field:
+        payload["body_field"] = body_field
+    if form_field:
+        payload["form_field"] = form_field
+    if agent_id:
+        payload["agent_id"] = agent_id
+    if agent_token:
+        payload["agent_token"] = agent_token
+
+    payload["method"] = method.upper()
+    payload["url"] = url
+
+    # Get authentication token
+    token = agent_token or os.environ.get("AS_AGENT_TOKEN")
+    auth_headers = {}
+    if token:
+        auth_headers["Authorization"] = f"Bearer {token}"
+
+    # Make request to cloud API
+    import httpx
+
+    try:
+        response = httpx.post(
+            f"{base_url}/v1/call",
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                **auth_headers
+            },
+            timeout=timeout
+        )
+
+        # Parse JSON response envelope (same format as binary --output json)
+        if response.headers.get("content-type", "").startswith("application/json"):
+            envelope = response.json()
+            return _parse_call_json_envelope(envelope, 0)  # duration from envelope
+        else:
+            # Fallback for non-JSON responses
+            text = response.text
+            return _parse_call_stdout(text, 0)
+
+    except httpx.TimeoutException:
+        raise CLIError("call", -1, "Command timed out")
+    except httpx.RequestError as e:
+        raise CLIError("call", -1, f"Cloud API request failed: {str(e)}")
+    except (json.JSONDecodeError, ValueError) as e:
+        raise CLIError("call", -1, f"Invalid response from cloud API: {str(e)}")
+
+
+async def _async_call_via_cloud_api(
+    url: str,
+    *,
+    method: str = "GET",
+    body: Any = None,
+    headers: dict[str, str] | None = None,
+    bearer: str | None = None,
+    basic: str | None = None,
+    header: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+    body_field: dict[str, str] | None = None,
+    form_field: dict[str, str] | None = None,
+    agent_id: str | None = None,
+    agent_token: str | None = None,
+    timeout: float = 30.0,
+) -> AgentSecretsResponse:
+    """Make an authenticated API call via the cloud API (async variant).
+
+    Communicates directly with the AgentSecrets cloud API to perform
+    authenticated calls, eliminating the need for a local binary.
+    """
+    import os
+
+    # Determine cloud API base URL
+    base_url = os.environ.get("AGENTSECRETS_API_URL", "https://secrets-api-orpin.vercel.app/api")
+
+    # Prepare request payload
+    payload: dict[str, Any] = {}
+    if body is not None:
+        if isinstance(body, bytes):
+            payload["body"] = body.decode("utf-8", errors="replace")
+        elif isinstance(body, str):
+            payload["body"] = body
+        else:
+            payload["body"] = json.dumps(body)
+
+    if headers:
+        payload["headers"] = headers
+    if bearer:
+        payload["bearer"] = bearer
+    if basic:
+        payload["basic"] = basic
+    if header:
+        payload["header"] = header
+    if query:
+        payload["query"] = query
+    if body_field:
+        payload["body_field"] = body_field
+    if form_field:
+        payload["form_field"] = form_field
+    if agent_id:
+        payload["agent_id"] = agent_id
+    if agent_token:
+        payload["agent_token"] = agent_token
+
+    payload["method"] = method.upper()
+    payload["url"] = url
+
+    # Get authentication token
+    token = agent_token or os.environ.get("AS_AGENT_TOKEN")
+    auth_headers = {}
+    if token:
+        auth_headers["Authorization"] = f"Bearer {token}"
+
+    # Make request to cloud API
+    import httpx
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            response = await client.post(
+                f"{base_url}/v1/call",
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    **auth_headers
+                }
+            )
+
+            # Parse JSON response envelope (same format as binary --output json)
+            if response.headers.get("content-type", "").startswith("application/json"):
+                envelope = response.json()
+                return _parse_call_json_envelope(envelope, 0)  # duration from envelope
+            else:
+                # Fallback for non-JSON responses
+                text = response.text
+                return _parse_call_stdout(text, 0)
+
+        except httpx.TimeoutException:
+            raise CLIError("call", -1, "Command timed out")
+        except httpx.RequestError as e:
+            raise CLIError("call", -1, f"Cloud API request failed: {str(e)}")
+        except (json.JSONDecodeError, ValueError) as e:
+            raise CLIError("call", -1, f"Invalid response from cloud API: {str(e)}")

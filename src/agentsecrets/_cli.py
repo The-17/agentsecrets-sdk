@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from .errors import CLIError
 from .proxy import find_binary
@@ -61,14 +62,15 @@ def run(
     )
 
 
-def run_json(*args: str, timeout: float = 30.0) -> dict:
-    """Run a CLI command and parse its stdout as JSON."""
-    result = run(*args, timeout=timeout)
+def run_json(*args: str, timeout: float = 30.0, fallback_parser: Callable[[str], dict[str, Any] | list[Any]] | None = None) -> dict[str, Any] | list[Any]:
+    """Run a CLI command with --output json if available, else fallback parser."""
+    # Try JSON first
     try:
-        return json.loads(result.stdout)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise CLIError(
-            " ".join(args),
-            0,
-            f"Expected JSON output, got: {result.stdout[:200]}",
-        ) from exc
+        result = run(*args, "--output", "json", timeout=timeout)
+        return json.loads(result.stdout)  # type: ignore[no-any-return]
+    except CLIError as e:
+        # If "--output json" flag not recognized, fallback to text parsing
+        if fallback_parser and "unknown flag" in e.stderr.lower():
+            result = run(*args, timeout=timeout)
+            return fallback_parser(result.stdout)
+        raise

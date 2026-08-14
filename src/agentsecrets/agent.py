@@ -101,7 +101,7 @@ class Agent:
 # Module level lifecycle functions
 # ---------------------------------------------------------------------------
 
-def list(project: str | None = None) -> list[Agent]:
+def list_agents(project: str | None = None) -> list[Agent]:
     """List registered agents in the current workspace or filtered by project."""
     args = ["agent", "list"]
     if project:
@@ -113,8 +113,8 @@ def list(project: str | None = None) -> list[Agent]:
 
 def get(name: str) -> Agent:
     """Retrieve a registered agent by name."""
-    agents = list()
-    for agent in agents:
+    agent_list = list_agents()
+    for agent in agent_list:
         if agent.name == name:
             return agent
     raise AgentSecretsError(f"Agent '{name}' not found in the current workspace.")
@@ -322,10 +322,10 @@ def _parse_token_list(output: str) -> list[AgentToken]:
         # Fixed-width slicing matching Go token list output formatting
         token_id = line[0:20].strip()
         label = line[20:36].strip()
-        expires = line[36:52].strip()
-        last_used = line[52:78].strip()
+        expires: str | None = line[36:52].strip()
+        last_used: str | None = line[52:78].strip()
         status = line[78:].strip()
-        
+
         if label == "(none)":
             label = ""
         if expires == "(none)":

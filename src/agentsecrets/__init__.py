@@ -13,7 +13,7 @@
     )
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 from . import agent
 from .client import AgentSecrets, AsyncAgentSecrets

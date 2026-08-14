@@ -24,6 +24,7 @@ import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
+from typing_extensions import Self
 
 from .auth import AuthContext, resolve
 from .call import async_call as _async_call
@@ -194,11 +195,109 @@ class _BaseClient:
         agent_token: str | None = None,
         timeout: float = 30.0,
     ) -> AgentSecretsResponse:
-        """Make an authenticated API call.
+        """Make an authenticated API call through the AgentSecrets proxy.
 
-        The call is resolved by the active backend (currently the local
-        ``agentsecrets`` binary). See :func:`agentsecrets.call.call` for full
-        parameter docs.
+        This method resolves credentials from the OS keychain and injects them
+        into the request at the transport layer, ensuring your code never handles
+        raw credential values. Supports seven authentication injection styles
+        to cover all common API authentication patterns.
+
+        :param url: Target upstream URL.
+        :param method: HTTP method (GET, POST, PUT, PATCH, DELETE, etc.).
+        :param body: Request body — dict (JSON-encoded), str, or bytes.
+        :param headers: Extra (non-auth) forward headers to pass through.
+        :param bearer: Bearer token secret key name. Injects as:
+            ``Authorization: Bearer <value>``
+        :param basic: Basic auth secret key name. Stores credential as
+            ``username:password`` or ``token`` and injects as:
+            ``Authorization: Basic base64(<value>)``
+        :param header: Dictionary mapping header names to secret key names.
+            Each header is injected as ``<header-name>: <value>``.
+        :param query: Dictionary mapping query parameter names to secret key names.
+            Each parameter is injected as ``<param-name>=<value>``.
+        :param body_field: Dictionary mapping JSON paths to secret key names.
+            Each field is injected into the JSON body at the specified path.
+            Uses dot notation for nested paths (e.g., ``{"auth.token": "API_KEY"}``
+            becomes ``{"auth": {"token": "<value>"}}``).
+        :param form_field: Dictionary mapping form field names to secret key names.
+            Each field is injected as ``<field-name>=<value>`` in application/x-www-form-urlencoded format.
+        :param agent: Optional agent identity for scoping the call.
+        :param agent_id: Optional agent ID (deprecated, use ``agent`` parameter).
+        :param agent_token: Optional agent token secret key name. Functions like
+            ``bearer`` but specifically for agent-to-agent authentication.
+        :param timeout: Maximum seconds to wait for the API call.
+
+        **Authentication Injection Styles:**
+
+        1. **Bearer Token** (most common — Stripe, OpenAI, GitHub):
+        .. code-block:: python
+            client.call("https://api.stripe.com/v1/balance", bearer="STRIPE_KEY")
+
+        2. **Custom Header** (SendGrid, Twilio, API Gateway):
+        .. code-block:: python
+            client.call(
+                "https://api.sendgrid.com/v3/mail/send",
+                method="POST",
+                body=email_payload,
+                header={"X-Api-Key": "SENDGRID_KEY"}
+            )
+
+        3. **Query Parameter** (Google Maps, weather APIs):
+        .. code-block:: python
+            client.call(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                query={"key": "GMAP_KEY", "address": "Lagos, Nigeria"}
+            )
+
+        4. **Basic Auth** (Jira, legacy REST APIs):
+        .. code-block:: python
+            client.call(
+                "https://yourcompany.atlassian.net/rest/api/2/issue",
+                basic="JIRA_CREDS"
+            )
+
+        5. **JSON Body Injection** (OAuth tokens, custom APIs):
+        .. code-block:: python
+            client.call(
+                "https://api.example.com/oauth/token",
+                method="POST",
+                body={"grant_type": "client_credentials"},
+                body_field={"client_secret": "CLIENT_SECRET"}
+            )
+
+        6. **Form Field Injection** (traditional OAuth, web forms):
+        .. code-block:: python
+            client.call(
+                "https://oauth.example.com/token",
+                method="POST",
+                form_field={"api_key": "API_KEY"}
+            )
+
+        7. **Agent Token** (agent-to-agent authentication):
+        .. code-block:: python
+            client.call(
+                "https://api.internal.example.com/data",
+                agent_token="INTERNAL_AGENT_TOKEN"
+            )
+
+        Multiple injection styles can be combined in a single call:
+        .. code-block:: python
+            client.call(
+                "https://api.example.com/data",
+                bearer="AUTH_TOKEN",
+                header={"X-Org-ID": "ORG_SECRET"},
+                query={"version": "API_VERSION"}
+            )
+
+        :returns: :class:`AgentSecretsResponse` containing status code, headers,
+            body, and metadata. The response object never contains injected
+            credential values — this is a structural security guarantee.
+
+        :raises AgentSecretsNotRunning: If the AgentSecrets proxy is not running.
+        :raises DomainNotAllowed: If the target domain is not on the allowlist.
+        :raises SecretNotFound: If any specified secret key is not found.
+        :raises UpstreamError: If the upstream API returns an error (injection succeeded).
+        :raises PermissionDenied: If insufficient permissions for the requested operation.
         """
         self._ensure_open()
 
@@ -347,7 +446,7 @@ class _BaseClient:
     # Resource management
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> AgentSecrets:
+    def __enter__(self) -> Self:
         self._ensure_open()
         return self
 
@@ -366,31 +465,90 @@ class _BaseClient:
 
 
 class AgentSecrets(_BaseClient):
-    """Synchronous AgentSecrets clientm, the default entry point.
+    """Synchronous AgentSecrets client, the default entry point.
 
-    All I/O is synchronous: :meth:`call` and :meth:`spawn` block until they
-    return. Async variants (:meth:`async_call`, :meth:`spawn_async`) are
-    available for occasional use inside an event loop, but if async is your
-    primary mode reach for :class:`AsyncAgentSecrets` instead.
+    This is the main client class for synchronous applications. All I/O operations
+    (:meth:`call`, :meth:`spawn`) are blocking and will return only when the
+    operation completes. For occasional async usage within an event loop, async
+    variants (:meth:`async_call`, :meth:`spawn_async`) are available, but for
+    primarily async codebases, use :class:`AsyncAgentSecrets` instead.
 
-    Use as a context manager to guarantee cleanup::
+    The client operates in dual-mode: by default it delegates to the local
+    ``agentsecrets`` binary for credential injection, but can be configured to
+    communicate directly with the AgentSecrets cloud API via environment
+    variables. It manages authentication, proxy connections, and provides access
+    to all management APIs (secrets, projects, workspaces, allowlist, proxy).
+
+    Use as a context manager to guarantee cleanup of resources::
 
         with AgentSecrets() as client:
-            client.call("https://api.stripe.com/v1/balance", bearer="STRIPE_KEY")
+            response = client.call(
+                "https://api.stripe.com/v1/balance",
+                bearer="STRIPE_KEY"
+            )
+            print(response.json())
+
+    The client can also be used manually, but remember to call :meth:`close()` when
+    finished to release resources::
+
+        client = AgentSecrets()
+        try:
+            response = client.call("https://api.api.example.com/endpoint")
+        finally:
+            client.close()
+
+    :param port: Proxy port (default: 8765, or ``AGENTSECRETS_PORT`` env var).
+    :param workspace: Active workspace name (or ``AGENTSECRETS_WORKSPACE``).
+    :param project: Active project name (or ``AGENTSECRETS_PROJECT``).
+    :param auto_start: If ``True``, warm up a persistent proxy when needed.
+    :param intercept: Enable transparent HTTP interception for ``requests``/``httpx``.
+    :param environment: Default environment for secret resolution.
+    :param agent: Default agent for calls (can be overridden per call).
+    :param agent_token: Default agent token (can be overridden per call).
+    :param timeout: Default timeout in seconds for API calls.
     """
 
 
 class AsyncAgentSecrets(_BaseClient):
     """Asynchronous AgentSecrets client.
 
-    Mirrors :class:`AgentSecrets`, but :meth:`call` and :meth:`spawn` are
-    coroutines — so the primary API is ``await client.call(...)`` (not
-    ``async_call``). Use ``async with`` for deterministic cleanup::
+    This is the async variant of :class:`AgentSecrets` designed for async-first
+    codebases. All I/O operations (:meth:`call`, :meth:`spawn`) are coroutines
+    and should be used with ``await``. The primary API is ``await client.call(...)``
+    (not :meth:`async_call` which exists only for backward compatibility).
+
+    The client operates in dual-mode: by default it delegates to the local
+    ``agentsecrets`` binary for credential injection, but can be configured to
+    communicate directly with the AgentSecrets cloud API via environment
+    variables.
+
+    Use ``async with`` for deterministic cleanup of resources::
 
         async with AsyncAgentSecrets() as client:
-            await client.call(
-                "https://api.stripe.com/v1/balance", bearer="STRIPE_KEY"
+            response = await client.call(
+                "https://api.stripe.com/v1/balance",
+                bearer="STRIPE_KEY"
             )
+            print(response.json())
+
+    The client can also be used manually, but remember to call :meth:`aclose()` when
+    finished to release resources::
+
+        client = AsyncAgentSecrets()
+        try:
+            response = await client.call("https://api.api.example.com/endpoint")
+        finally:
+            await client.aclose()
+
+    :param port: Proxy port (default: 8765, or ``AGENTSECRETS_PORT`` env var).
+    :param workspace: Active workspace name (or ``AGENTSECRETS_WORKSPACE``).
+    :param project: Active project name (or ``AGENTSECRETS_PROJECT``).
+    :param auto_start: If ``True``, warm up a persistent proxy when needed.
+    :param intercept: Enable transparent HTTP interception for ``requests``/``httpx``.
+    :param environment: Default environment for secret resolution.
+    :param agent: Default agent for calls (can be overridden per call).
+    :param agent_token: Default agent token (can be overridden per call).
+    :param timeout: Default timeout in seconds for API calls.
     """
 
     async def call(  # type: ignore[override]
@@ -445,7 +603,7 @@ class AsyncAgentSecrets(_BaseClient):
         """
         return await self.spawn_async(command, capture=capture, timeout=timeout)
 
-    async def __aenter__(self) -> AsyncAgentSecrets:
+    async def __aenter__(self) -> Self:
         self._ensure_open()
         return self
 

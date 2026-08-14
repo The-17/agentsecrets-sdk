@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from typing import Any
 
 from .errors import CLIError
 from .models import SpawnResult
@@ -38,7 +39,7 @@ def spawn(
     binary = find_binary()
     full_cmd = [binary, "env", "--"] + command
 
-    kwargs: dict = {"timeout": timeout}
+    kwargs: dict[str, Any] = {"timeout": timeout}
     if capture:
         kwargs["capture_output"] = True
         kwargs["text"] = True

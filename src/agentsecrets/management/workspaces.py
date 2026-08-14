@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import List
+
 from .._cli import run
 from ..models import Member, Workspace
 
@@ -40,7 +42,7 @@ class WorkspacesClient:
         """Demote an admin to member."""
         run("workspace", "demote", email)
 
-    def members(self) -> list[Member]:
+    def members(self) -> List[Member]:
         """List members of the current workspace."""
         result = run("workspace", "members")
         return _parse_member_list(result.stdout)

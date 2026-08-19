@@ -635,6 +635,7 @@ pytest -v
 ## Links
 
 - **AgentSecrets CLI**: [github.com/The-17/agentsecrets](https://github.com/The-17/agentsecrets)
+- **AgentSecrets Server**: [github.com/The-17/agentsecrets-server](https://github.com/The-17/agentsecrets-server) — open-source server backend for sync, workspaces, and telemetry
 - **SDK repo**: [github.com/The-17/agentsecrets-sdk](https://github.com/The-17/agentsecrets-sdk)
 - **ClawHub**: [clawhub.ai/SteppaCodes/agentsecrets](https://clawhub.ai/SteppaCodes/agentsecrets)
 - **Security**: engineering@theseventeen.co
